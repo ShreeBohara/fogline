@@ -1,0 +1,52 @@
+/*
+ * Fogline viewer styles.
+ *
+ * Every rule is scoped under `.fogline`, and every color and font comes from
+ * a custom property, so the viewer can sit inside another page and a later
+ * phase can restyle it by changing the tokens.
+ */
+
+.fogline {
+  color-scheme: light dark;
+
+  --fl-surface: light-dark(#fafaf8, #151514);
+  --fl-surface-code: light-dark(#eeede9, #272725);
+  --fl-text: light-dark(#1d1c1a, #eceae5);
+  --fl-text-muted: light-dark(#63615c, #a5a39c);
+  --fl-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --fl-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  background: var(--fl-surface);
+  color: var(--fl-text);
+  font-family: var(--fl-font);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.fogline code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--fl-surface-code);
+  font-family: var(--fl-font-mono);
+  font-size: 0.9em;
+}
+
+.fogline-shell {
+  display: grid;
+  place-content: center;
+  min-height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+
+.fogline-shell h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.fogline-shell p {
+  max-width: 32rem;
+  margin: 0;
+  color: var(--fl-text-muted);
+}

@@ -1,0 +1,8 @@
+/* Page-level rules for the standalone shell. An embedding page keeps its own. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
