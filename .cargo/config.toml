@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# The Windows binary must run without the Visual C++ redistributable
+# (docs/specs/phase-1.md, section 5.8).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

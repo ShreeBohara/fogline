@@ -1,0 +1,13 @@
+[package]
+name = "fogline-core"
+description = "The Fogline engine: reads a git repository and produces the facts behind its map."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

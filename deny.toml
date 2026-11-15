@@ -1,0 +1,39 @@
+# cargo-deny: licences, advisories, banned crates and sources.
+# CI runs `cargo deny check` (the "dependency policy" job).
+
+[graph]
+# Check what ships: the five release targets (docs/specs/phase-1.md, 5.8).
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# Defaults apply: a known vulnerability or an unsound crate fails the check.
+
+[licenses]
+# Every dependency must be usable under one of these.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # The engine makes no network requests (spec 5.1, rule 4). Keeping HTTP
+    # clients out of the dependency graph makes that checkable.
+    { crate = "reqwest", reason = "the engine must not make network requests" },
+    { crate = "ureq", reason = "the engine must not make network requests" },
+    { crate = "isahc", reason = "the engine must not make network requests" },
+    { crate = "curl", reason = "the engine must not make network requests" },
+    { crate = "attohttpc", reason = "the engine must not make network requests" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
