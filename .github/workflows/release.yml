@@ -131,10 +131,11 @@ jobs:
       # platform packages first without knowing any package's name.
       - name: Make the six npm packages
         run: |
-          node scripts/npm-pack.mjs --artifacts artifacts --out packages
+          # Not "packages": the repository already has a folder of that name.
+          node scripts/npm-pack.mjs --artifacts artifacts --out npm-packages
           mkdir -p tarballs/platform tarballs/launcher
-          (cd tarballs/platform && npm pack ../../packages/platform/*)
-          (cd tarballs/launcher && npm pack ../../packages/launcher/*)
+          (cd tarballs/platform && npm pack ../../npm-packages/platform/*)
+          (cd tarballs/launcher && npm pack ../../npm-packages/launcher/*)
           platform=(tarballs/platform/*.tgz)
           launcher=(tarballs/launcher/*.tgz)
           if [ "${#platform[@]}" -ne 5 ] || [ "${#launcher[@]}" -ne 1 ] || [ ! -f "${launcher[0]}" ]; then
