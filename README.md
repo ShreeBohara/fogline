@@ -13,11 +13,12 @@ Coding agents now write code faster than people can read it. Fogline is meant to
 | `fogline version` | Works. Prints the version, or build and environment details with `--json`. |
 | `fogline scan` | Recognised but not implemented. It exits with an error that says so. |
 | Viewer | A shell that looks for a bundle and reports what it found. There is no map yet. |
+| npm launcher | Finds the binary for the machine and runs it. It is tested, and nothing is published to npm yet. |
 | Test kit | Builds small git repositories that have the same commit ids on every machine. |
 
 ## Build and test
 
-You need git, [rustup](https://rustup.rs) (it installs the Rust version pinned in `rust-toolchain.toml`), and, for the viewer, Node 26 with pnpm.
+You need git, [rustup](https://rustup.rs) (it installs the Rust version pinned in `rust-toolchain.toml`), and, for the viewer and the npm packaging, Node 26 with pnpm.
 
 Run everything CI runs:
 
@@ -25,7 +26,7 @@ Run everything CI runs:
 cargo xtask ci
 ```
 
-Leave out the viewer if you do not have Node:
+Leave out everything that needs Node:
 
 ```bash
 cargo xtask ci --skip-viewer
@@ -46,6 +47,8 @@ cargo run -p fogline -- version --json
 | `crates/fogline-testkit` | Fixture repositories for tests. |
 | `xtask` | Developer commands, written in Rust so they behave the same on every OS. |
 | `packages/viewer` | The viewer: React and TypeScript, built with Vite. |
+| `npm/fogline` | The npm launcher: a script with no dependencies that finds the binary for the machine and runs it. |
+| `scripts` | `npm-pack.mjs` turns built binaries into the npm packages. |
 | `docs` | The plan, the phase specs and the decision records. |
 
 ## Ground rules
