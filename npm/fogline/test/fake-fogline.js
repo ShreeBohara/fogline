@@ -34,8 +34,9 @@ switch (mode) {
   // which nothing else in the tests produces.
   case "wait":
     process.on("SIGTERM", () => {
-      process.stdout.write("got SIGTERM\n");
-      process.exit(42);
+      // Exit from the write's callback. A write to a pipe can finish later,
+      // and exiting before it does would lose the line.
+      process.stdout.write("got SIGTERM\n", () => process.exit(42));
     });
     process.stdout.write("ready\n");
     setInterval(() => {}, 1000);
@@ -43,5 +44,5 @@ switch (mode) {
 
   default:
     process.stderr.write(`fake-fogline: unknown mode ${mode}\n`);
-    process.exit(99);
+    process.exitCode = 99;
 }
