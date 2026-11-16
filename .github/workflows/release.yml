@@ -27,6 +27,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every step runs in bash, on Windows too, and stops at the first command
+# that fails, including one in the middle of a pipe.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Fails in seconds, before five builds start, when the package manifests
   # are inconsistent or a tag is not the version in Cargo.toml.
@@ -71,9 +77,6 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest, exe: .exe }
     permissions:
       contents: read
-    defaults:
-      run:
-        shell: bash
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -96,6 +99,8 @@ jobs:
           path: target/${{ matrix.target }}/release/fogline${{ matrix.exe }}
           if-no-files-found: error
           retention-days: 7
+          # A job that runs again replaces what its earlier attempt uploaded.
+          overwrite: true
 
   # Turns the five binaries into what gets published: six npm tarballs, and
   # five archives with their checksums for the GitHub release.
@@ -120,12 +125,22 @@ jobs:
           path: artifacts
       # Uploading an artifact drops the executable bit. The pack script puts
       # it back, and tarballs and archives carry it from here on.
+      #
+      # The pack script sorts its folders into platform/ and launcher/, and
+      # the tarballs keep that split. The publish job can then take the
+      # platform packages first without knowing any package's name.
       - name: Make the six npm packages
         run: |
           node scripts/npm-pack.mjs --artifacts artifacts --out packages
-          mkdir tarballs
-          cd tarballs
-          npm pack ../packages/*
+          mkdir -p tarballs/platform tarballs/launcher
+          (cd tarballs/platform && npm pack ../../packages/platform/*)
+          (cd tarballs/launcher && npm pack ../../packages/launcher/*)
+          platform=(tarballs/platform/*.tgz)
+          launcher=(tarballs/launcher/*.tgz)
+          if [ "${#platform[@]}" -ne 5 ] || [ "${#launcher[@]}" -ne 1 ] || [ ! -f "${launcher[0]}" ]; then
+            echo "Expected 5 platform tarballs and 1 launcher tarball."
+            exit 1
+          fi
       - name: Make the release archives and their checksums
         run: |
           mkdir archives
@@ -144,15 +159,19 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-tarballs
-          path: tarballs/*.tgz
+          path: tarballs/
           if-no-files-found: error
           retention-days: 7
+          # A job that runs again replaces what its earlier attempt uploaded.
+          overwrite: true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-archives
           path: archives/
           if-no-files-found: error
           retention-days: 7
+          # A job that runs again replaces what its earlier attempt uploaded.
+          overwrite: true
 
   # Everything below runs only for a version tag.
 
@@ -200,21 +219,39 @@ jobs:
           name: npm-tarballs
           path: tarballs
       # The launcher goes last, so it is never on the registry before the
-      # binaries it depends on. A version that is already there is skipped,
-      # which makes this step safe to run again after a failure. The registry
-      # is asked directly, so the answer does not depend on how npm is
-      # signed in: 200 means published, 404 means not, and anything else
-      # stops the release instead of guessing.
+      # binaries it depends on.
+      #
+      # The registry is asked directly whether each version exists, so the
+      # answer does not depend on how npm is signed in.
+      # - 404: it does not exist, and it is published.
+      # - 200: it exists. If the registry has this very file, an earlier
+      #   attempt of this release got that far, and the file is skipped. That
+      #   is what makes the step safe to run again. If it has a different
+      #   file, an earlier run published another build under this version,
+      #   and carrying on would mix the two, so the release stops.
+      # - Anything else stops the release instead of guessing.
       - name: Publish the platform packages, then the launcher
         run: |
           npm --version
-          for tarball in tarballs/fogline-cli-*.tgz tarballs/fogline-[0-9]*.tgz; do
+          for tarball in tarballs/platform/*.tgz tarballs/launcher/*.tgz; do
+            if [ ! -f "$tarball" ]; then
+              echo "There is no tarball at $tarball. Stopping."
+              exit 1
+            fi
             package="$(tar -xzOf "$tarball" package/package.json |
               node -p 'const m = JSON.parse(require("fs").readFileSync(0, "utf8")); m.name.replace("/", "%2F") + "/" + m.version')"
-            answer="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/$package")"
+            answer="$(curl --silent --output published.json --write-out '%{http_code}' "https://registry.npmjs.org/$package")"
             case "$answer" in
-              200) echo "$tarball is already on npm. Skipping." ;;
               404) npm publish "$tarball" --access public ;;
+              200)
+                theirs="$(node -p 'JSON.parse(require("fs").readFileSync("published.json", "utf8")).dist.shasum')"
+                ours="$(sha1sum "$tarball" | cut -d ' ' -f 1)"
+                if [ -z "$theirs" ] || [ "$theirs" != "$ours" ]; then
+                  echo "npm already has $package, and it is a different file: $theirs there, $ours here. Stopping."
+                  exit 1
+                fi
+                echo "$tarball is already on npm. Skipping."
+                ;;
               *)
                 echo "The registry answered $answer for $package. Stopping."
                 exit 1
@@ -265,16 +302,18 @@ jobs:
           node-version: 26
           package-manager-cache: false
       - name: Run the published package
-        shell: bash
         env:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
           cd "$RUNNER_TEMP"
           # The registry can take a moment to serve a version it just accepted.
+          # Each attempt gets its own npm cache. npx keeps what it installed,
+          # so an install made too early, without the binary, would otherwise
+          # be reused by every later attempt.
           output=""
           for attempt in 1 2 3 4 5 6; do
-            if output="$(npx --yes "fogline@$version" version)"; then
+            if output="$(npm_config_cache="$RUNNER_TEMP/npm-cache-$attempt" npx --yes "fogline@$version" version)"; then
               break
             fi
             echo "Attempt $attempt failed. Waiting 20 seconds."

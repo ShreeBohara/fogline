@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { PackError, pack } from "./npm-pack.mjs";
+import { PackError, pack, removeScratch } from "./npm-pack.mjs";
 
 /** A check that did not hold, reported as one line. */
 class SmokeFailure extends Error {}
@@ -91,7 +91,7 @@ function smoke(binary) {
       `\npack-smoke: ok. Installed from tarballs and run through npx:\n  ${installed.trim()}`,
     );
   } finally {
-    fs.rmSync(work, { recursive: true, force: true });
+    removeScratch(work);
   }
 }
 

@@ -1,6 +1,6 @@
 # Phase 1 spec — reset and tracer bullet
 
-Status: in progress; milestone M1 (the skeleton) is built · Written 2026-11-15 · Implements the [plan](../plan.md) §8, Phase 1 · Working name: **Fogline**
+Status: in progress; milestone M1 (the skeleton) is built, and M2 (distribution) is built as far as the name lock, task 2.5 · Written 2026-11-15 · Implements the [plan](../plan.md) §8, Phase 1 · Working name: **Fogline**
 
 How to read this:
 
@@ -379,7 +379,7 @@ Engineering rules:
 
 - **`fogline`** — `bin/fogline.js` (CommonJS, no dependencies, Node 18 or newer), and `optionalDependencies` pinning the five platform packages to the same exact version. No install scripts, so `--ignore-scripts` works.
 - **`@fogline/cli-<os>-<cpu>`** — one executable and a `package.json` with `os` and `cpu`, so npm installs only the matching one. It has no `bin` entry: the launcher owns the `fogline` command.
-- **One source for each fact** — the version is written only in `Cargo.toml`, and the platforms only in `npm/fogline/lib/platforms.js`. The launcher's `package.json` in the repository is a template: it is marked private and has no version, so that folder cannot be published by mistake. `scripts/npm-pack.mjs` writes the published manifests from those two sources, so the six packages cannot disagree.
+- **One source for each fact** — the version is written only in `Cargo.toml`. The launcher and the pack script read the platforms from one table, `npm/fogline/lib/platforms.js`. The launcher's `package.json` in the repository is a template: it is marked private and has no version, so that folder cannot be published by mistake. `scripts/npm-pack.mjs` writes the published manifests from those two sources, so the six packages cannot disagree. The workflow matrices and `deny.toml` cannot read the table, so they repeat the five targets, and a test fails when a copy differs from it.
 - **Launcher logic** — honor `FOGLINE_BINARY` if set; otherwise resolve the platform package; spawn it with inherited stdio; pass SIGINT, SIGTERM and SIGHUP on to it; exit with its code. If no package matches (unsupported platform, or `--omit=optional`), list the supported platforms and the other ways to install, and exit 1. A binary that cannot be started also exits 1.
 - **When a signal ends the binary** — the launcher ends by the same signal if it is one that only stops a program (SIGINT, SIGTERM, SIGHUP, SIGKILL), so a shell sees what happened. Any other signal means the binary crashed. Raising it again would make Node write a core dump about itself, so the launcher prints which signal it was and exits with 128 plus the signal's number.
 
@@ -429,10 +429,10 @@ The riskiest part goes first, while the binary is still trivial.
 
 | # | Task | Check |
 |---|---|---|
-| 2.1 | Launcher package with `node:test` tests: platform table, missing package, exit code, signal | Pass on Node 18 and 26 |
+| 2.1 ✓ | Launcher package with `node:test` tests: platform table, missing package, exit code, signal | Pass on Node 18 and 26 |
 | 2.2 ✓ | `scripts/npm-pack.mjs`: artifacts in, six publishable folders out. It checks that versions match, sets the executable bit, and runs `version` on the host's binary. | `node scripts/npm-pack.mjs --dry-run`, and `node --test scripts/npm-pack.test.mjs` |
-| 2.3 | CI job `pack-smoke` on the five runners: build, pack, install the tarballs into an empty project, run `npx fogline version` | Green on all five |
-| 2.4 | `release.yml` (§8) with a dry-run mode | A dry run yields five binaries, six npm tarballs, and five archives with their checksums |
+| 2.3 ✓ | CI job `pack-smoke` on the five runners: build, pack, install the tarballs into an empty project, run `npx fogline version` | Green on all five |
+| 2.4 ✓ | `release.yml` (§8) with a dry-run mode | A dry run yields five binaries, six npm tarballs, and five archives with their checksums |
 | 2.5 | **Name lock** (maintainer). Rename the repository if needed. `repository.url` is written once, in `npm/fogline/package.json`, and the pack script copies it into every package. | — |
 | 2.6 | Bootstrap. The maintainer publishes 0.0.1 by hand from the tarballs of a dry run, then adds a trusted publisher to each of the six packages: this repository, the workflow `release.yml`, the environment `npm`. Tag `v0.0.2`; CI publishes with no token. The publisher setting expires unless a publish succeeds within two days. | `npm view fogline@0.0.2 dist.attestations` is present; the release smoke job is green on five runners |
 | 2.7 | ADR-0004: distribution | Merged |
@@ -498,7 +498,7 @@ The riskiest part goes first, while the binary is still trivial.
 | Viewer unit (Vitest) | Bundle decoding, hierarchy building, color scales, formatters |
 | Viewer end-to-end (Playwright, Chromium on Linux) | A fixture bundle served by the real binary: the ready event, cells drawn, tooltip, layer switch, caveats listed, no outside requests, one screenshot baseline |
 | Launcher (`node:test`) | Platform table, missing package message, exit code and signal pass-through |
-| Pack script (`node:test`) | The version source, the generated manifests, missing binaries, a wrong version or target in the host's binary, and the refusal to write into a folder that has files |
+| Pack script (`node:test`) | The version source, the generated manifests, missing binaries, a wrong version or target in the host's binary, the refusal to write into a folder that has files, a checkout reached through a symlink, and the five targets repeated in the workflows and `deny.toml` |
 | Pack smoke, release smoke | §8 |
 
 Fixture repositories are built at test time by `fogline-testkit` with fixed dates, names and settings, so their SHAs are the same everywhere.
@@ -540,11 +540,11 @@ Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today fr
 
 1. `check` — the package manifests are consistent, and on a release the tag is `v` plus the version in `Cargo.toml`. It fails before any build starts.
 2. `build` ×5 — on the native runners, with `--locked` and no build cache.
-3. `pack` — `scripts/npm-pack.mjs` and `npm pack` make six tarballs; the binaries also go into five archives with a `SHA256SUMS` file.
+3. `pack` — `scripts/npm-pack.mjs` and `npm pack` make six tarballs, sorted into `platform/` and `launcher/` so that no later step needs a package's name; the binaries also go into five archives with a `SHA256SUMS` file.
 4. `attest` — a build-provenance attestation for each archive, so a download can be checked with `gh attestation verify`. npm adds its own provenance to each package in the next step.
-5. `publish-npm` — publish the five platform packages, then the launcher, through npm trusted publishing. It asks the registry whether each version exists and skips the ones that do.
+5. `publish-npm` — publish the five platform packages, then the launcher, through npm trusted publishing. It asks the registry whether each version exists. One that exists is skipped only if the registry's checksum is this run's tarball, which is what a run started again after a failure finds. A different file under the same version stops the release, because carrying on would mix two builds.
 6. `github-release` — a pre-release with the archives and checksums.
-7. `smoke` ×5 — on clean runners: `npx --yes fogline@<version> version`, then a fixture scan from M3.
+7. `smoke` ×5 — on clean runners: `npx --yes fogline@<version> version`, then a fixture scan from M3. It retries while the registry catches up, each time with an empty npm cache, so an install made too early is not reused.
 
 The binary does not embed the viewer yet, so there is no viewer build here. Task 5.2 adds it as the first step.
 
