@@ -11,3 +11,5 @@ Notable changes, newest first. The format follows [Keep a Changelog](https://kee
 - A test kit that builds fixture git repositories with the same commit ids on every machine, and black-box contract tests that run the binary.
 - A viewer shell that looks for a bundle and reports what it found.
 - CI for Linux, macOS and Windows, a dependency policy, and workflow linting.
+- An npm launcher that finds the binary for the machine, runs it, and passes exit codes and signals through. Nothing is published to npm yet.
+- A packaging script that turns built binaries into the launcher package and five platform packages.

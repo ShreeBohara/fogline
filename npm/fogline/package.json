@@ -1,0 +1,32 @@
+{
+  "name": "fogline",
+  "private": true,
+  "description": "Maps which parts of a codebase arrived in agent-attributed commits.",
+  "keywords": [
+    "git",
+    "codebase",
+    "provenance",
+    "cli"
+  ],
+  "homepage": "https://github.com/ShreeBohara/fogline#readme",
+  "bugs": "https://github.com/ShreeBohara/fogline/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShreeBohara/fogline.git"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "fogline": "bin/fogline.js"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/launcher.test.js"
+  }
+}

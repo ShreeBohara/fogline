@@ -13,8 +13,9 @@ Usage: cargo xtask <command>
 
 Commands:
   ci [--skip-viewer]   Run the checks CI runs: formatting, lints and tests for
-                       the Rust workspace, then lint, type check, tests and
-                       build for the viewer
+                       the Rust workspace, then the checks that need Node:
+                       the viewer, the npm launcher and the npm packaging.
+                       --skip-viewer leaves out everything that needs Node.
 ";
 
 fn main() -> ExitCode {
@@ -79,7 +80,7 @@ fn ci(args: &[String]) -> Result<(), String> {
     }
 
     if skip_viewer {
-        println!("\n==> viewer checks skipped");
+        println!("\n==> checks that need Node skipped");
         return Ok(());
     }
 
@@ -99,7 +100,23 @@ fn ci(args: &[String]) -> Result<(), String> {
     let viewer = |script: &'static str| pnpm(&["--filter", "@fogline/viewer", "run", script]);
     step("viewer: type check", viewer("typecheck"))?;
     step("viewer: test", viewer("test"))?;
-    step("viewer: build", viewer("build"))
+    step("viewer: build", viewer("build"))?;
+
+    // The npm packaging needs Node and nothing else: the launcher and the
+    // scripts have no dependencies.
+    let node = |args: &[&str]| {
+        let mut command = Command::new("node");
+        command.args(args).current_dir(&root);
+        command
+    };
+    step(
+        "launcher: test",
+        node(&["--test", "npm/fogline/test/launcher.test.js"]),
+    )?;
+    step(
+        "packaging: test",
+        node(&["--test", "scripts/npm-pack.test.mjs"]),
+    )
 }
 
 /// Runs one named step, letting its output through.

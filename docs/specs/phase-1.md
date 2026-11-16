@@ -74,7 +74,7 @@ Fogline stays unless a `.dev` domain turns out to matter. The npm scope `@foglin
 ## 4. The slice
 
 ```
-npx fogline                       npm launcher (about 40 lines of JavaScript)
+npx fogline                       npm launcher (a small script with no dependencies)
   └─ fogline                      Rust binary for this platform
        scan   ── git plumbing, read-only ──▶ facts in memory
                                               │
@@ -99,8 +99,8 @@ crates/
   fogline-testkit/     fixture repositories and golden-file helpers
 xtask/                 developer commands: ci, viewer, schema, synth, bench
 packages/viewer/       React package and standalone shell; spike/ holds the renderer candidates
-npm/                   launcher package and the platform-package template
-scripts/npm-pack.mjs   turns release artifacts into publishable npm folders
+npm/fogline/           launcher package; its lib/platforms.js is the one table of platforms
+scripts/npm-pack.mjs   turns release binaries into publishable npm folders
 schemas/bundle-v0.schema.json
 tests/contract/        golden bundles the contract tests compare against (from M3)
 bench/corpus.toml      pinned benchmark repositories
@@ -377,8 +377,10 @@ Engineering rules:
 ### 5.8 npm packaging
 
 - **`fogline`** — `bin/fogline.js` (CommonJS, no dependencies, Node 18 or newer), and `optionalDependencies` pinning the five platform packages to the same exact version. No install scripts, so `--ignore-scripts` works.
-- **`@fogline/cli-<os>-<cpu>`** — one executable and a `package.json` with `os` and `cpu`, so npm installs only the matching one.
-- **Launcher logic** — honor `FOGLINE_BINARY` if set; otherwise resolve the platform package; spawn it with inherited stdio; exit with the child's code or re-raise its signal. If no package matches (unsupported platform, or `--omit=optional`), list the supported platforms and the other ways to install, and exit 1.
+- **`@fogline/cli-<os>-<cpu>`** — one executable and a `package.json` with `os` and `cpu`, so npm installs only the matching one. It has no `bin` entry: the launcher owns the `fogline` command.
+- **One source for each fact** — the version is written only in `Cargo.toml`, and the platforms only in `npm/fogline/lib/platforms.js`. The launcher's `package.json` in the repository is a template: it is marked private and has no version, so that folder cannot be published by mistake. `scripts/npm-pack.mjs` writes the published manifests from those two sources, so the six packages cannot disagree.
+- **Launcher logic** — honor `FOGLINE_BINARY` if set; otherwise resolve the platform package; spawn it with inherited stdio; pass SIGINT, SIGTERM and SIGHUP on to it; exit with its code. If no package matches (unsupported platform, or `--omit=optional`), list the supported platforms and the other ways to install, and exit 1. A binary that cannot be started also exits 1.
+- **When a signal ends the binary** — the launcher ends by the same signal if it is one that only stops a program (SIGINT, SIGTERM, SIGHUP, SIGKILL), so a shell sees what happened. Any other signal means the binary crashed. Raising it again would make Node write a core dump about itself, so the launcher prints which signal it was and exits with 128 plus the signal's number.
 
 | Target | Runner label | Package |
 |---|---|---|
@@ -392,7 +394,7 @@ Engineering rules:
 - The Windows binary links the C runtime statically, so no Visual C++ redistributable is needed.
 - LATER: Windows on Arm (`windows-11-arm`), Homebrew, a shell installer.
 
-Traps to design for: GitHub's artifact upload drops the executable bit, so archive the binaries or `chmod` before packing. Publish the platform packages before the launcher. Make the publish step safe to re-run.
+Traps to design for: GitHub's artifact upload drops the executable bit, so archive the binaries or `chmod` before packing. Windows cannot record that bit at all, so the Unix packages are packed on macOS or Linux, and the pack script refuses otherwise. Publish the platform packages before the launcher. Make the publish step safe to re-run.
 
 ---
 
@@ -414,7 +416,7 @@ Each task ends with a check that is a command or an observable fact.
 |---|---|---|
 | 1.1 ✓ | New public repository with the layout in §4, MIT licence, an honest pre-alpha README, `CLAUDE.md`, and the plan and this spec under `docs/` | The first commits hold the docs and the skeleton |
 | 1.2 ✓ | `fogline version`; a `scan` that fails with "not implemented"; a viewer shell that renders "no bundle". Embedding the viewer in the binary moved to task 5.2, where `open` first serves it. | `cargo run -p fogline -- version --json` |
-| 1.3 | Test kit: a fixture builder with pinned dates and identities, the contract harness driven by `FOGLINE_BIN`, fixture F1 | The fixture's HEAD SHA equals the recorded constant on all three OSes |
+| 1.3 ✓ | Test kit: a fixture builder with pinned dates and identities, the contract harness driven by `FOGLINE_BIN`, fixture F1 | The fixture's HEAD SHA equals the recorded constant on all three OSes |
 | 1.4 | `ci.yml` (§8) | A pull request shows every job green; branch protection requires them |
 | 1.5 ✓ | ADR-0001: repository, name, versioning, conventions | Merged |
 
@@ -425,10 +427,10 @@ The riskiest part goes first, while the binary is still trivial.
 | # | Task | Check |
 |---|---|---|
 | 2.1 | Launcher package with `node:test` tests: platform table, missing package, exit code, signal | Pass on Node 18 and 26 |
-| 2.2 | `scripts/npm-pack.mjs`: artifacts in, six publishable folders out. It checks that versions match, sets the executable bit, and runs `version` on the host's binary. | `node scripts/npm-pack.mjs --dry-run` |
+| 2.2 ✓ | `scripts/npm-pack.mjs`: artifacts in, six publishable folders out. It checks that versions match, sets the executable bit, and runs `version` on the host's binary. | `node scripts/npm-pack.mjs --dry-run`, and `node --test scripts/npm-pack.test.mjs` |
 | 2.3 | CI job `pack-smoke` on the five runners: build, pack, install the tarballs into an empty project, run `npx fogline version` | Green on all five |
 | 2.4 | `release.yml` (§8) with a dry-run mode | A dry run yields five artifacts and six packed folders |
-| 2.5 | **Name lock** (maintainer). Rename the repository if needed and set `repository.url` in every package. | — |
+| 2.5 | **Name lock** (maintainer). Rename the repository if needed. `repository.url` is written once, in `npm/fogline/package.json`, and the pack script copies it into every package. | — |
 | 2.6 | Bootstrap. The maintainer publishes 0.0.1 by hand from the CI-built artifacts, then adds a trusted publisher to each of the six packages. Tag `v0.0.2`; CI publishes with no token. The publisher setting expires unless a publish succeeds within two days. | `npm view fogline@0.0.2 dist.attestations` is present; the release smoke job is green on five runners |
 | 2.7 | ADR-0004: distribution | Merged |
 
@@ -493,6 +495,7 @@ The riskiest part goes first, while the binary is still trivial.
 | Viewer unit (Vitest) | Bundle decoding, hierarchy building, color scales, formatters |
 | Viewer end-to-end (Playwright, Chromium on Linux) | A fixture bundle served by the real binary: the ready event, cells drawn, tooltip, layer switch, caveats listed, no outside requests, one screenshot baseline |
 | Launcher (`node:test`) | Platform table, missing package message, exit code and signal pass-through |
+| Pack script (`node:test`) | The version source, the generated manifests, missing binaries, a wrong version or target in the host's binary, and the refusal to write into a folder that has files |
 | Pack smoke, release smoke | §8 |
 
 Fixture repositories are built at test time by `fogline-testkit` with fixed dates, names and settings, so their SHAs are the same everywhere.
@@ -524,6 +527,7 @@ Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today fr
 |---|---|---|
 | `rust` | Linux, macOS, Windows | rustfmt, clippy with warnings as errors, cargo-nextest. The black-box contract tests run here: they are integration tests of the `fogline` crate. |
 | `viewer` | Linux | Biome, type check, Vitest, build; Playwright from M5 |
+| `launcher` | Linux on Node 18 and 26, Windows on Node 26 | The launcher's tests. Node 18 is the oldest version it supports. |
 | `pack-smoke` | The five runners in §5.8 | Build, pack, install the tarballs, `npx fogline version`, one fixture scan |
 | `schema-drift` | Linux | Regenerates the schema and the TypeScript types; fails on any diff |
 | `deny` | Linux | cargo-deny: advisories, licences, and a ban on HTTP client crates in the engine |
