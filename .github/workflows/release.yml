@@ -1,0 +1,284 @@
+name: release
+
+# A version tag starts a real release. Everything else is a dry run: it
+# builds and packs exactly as a release does, keeps the results as workflow
+# artifacts, and publishes nothing. A dry run starts by hand from the Actions
+# tab, and on any pull request that changes what a release runs.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/npm-pack.mjs
+      - npm/**
+
+# Nothing is granted by default. Each job asks for what it needs. Only the
+# two jobs that sign or publish can get an identity token, and neither of
+# them builds or runs code from this repository.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A release that has started publishing is never cut off.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fails in seconds, before five builds start, when the package manifests
+  # are inconsistent or a tag is not the version in Cargo.toml.
+  check:
+    name: check the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Check the manifests, and the tag on a release
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: |
+          if [ -n "$TAG" ]; then
+            node scripts/npm-pack.mjs --dry-run --expect-version "${TAG#v}"
+          else
+            node scripts/npm-pack.mjs --dry-run
+          fi
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The release targets, each on its native runner (spec section 5.8).
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, exe: .exe }
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml, and the target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      # No build cache on purpose: a release is built from scratch.
+      - name: Build
+        env:
+          # The binary reports this as its commit in `fogline version --json`.
+          FOGLINE_BUILD_COMMIT: ${{ github.sha }}
+        run: cargo build --release --locked --target "$TARGET" -p fogline
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fogline-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/fogline${{ matrix.exe }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Turns the five binaries into what gets published: six npm tarballs, and
+  # five archives with their checksums for the GitHub release.
+  pack:
+    name: pack
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fogline-*
+          path: artifacts
+      # Uploading an artifact drops the executable bit. The pack script puts
+      # it back, and tarballs and archives carry it from here on.
+      - name: Make the six npm packages
+        run: |
+          node scripts/npm-pack.mjs --artifacts artifacts --out packages
+          mkdir tarballs
+          cd tarballs
+          npm pack ../packages/*
+      - name: Make the release archives and their checksums
+        run: |
+          mkdir archives
+          for dir in artifacts/fogline-*; do
+            target="${dir#artifacts/fogline-}"
+            if [ -f "$dir/fogline.exe" ]; then
+              zip --quiet --junk-paths "archives/fogline-$target.zip" "$dir/fogline.exe" LICENSE
+            else
+              chmod 755 "$dir/fogline"
+              tar -czf "archives/fogline-$target.tar.gz" -C "$dir" fogline -C "$GITHUB_WORKSPACE" LICENSE
+            fi
+          done
+          cd archives
+          sha256sum fogline-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-tarballs
+          path: tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-archives
+          path: archives/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Everything below runs only for a version tag.
+
+  # Signs a statement that this workflow run built each archive, so anyone
+  # can check a download with `gh attestation verify`.
+  attest:
+    name: attest
+    if: github.event_name == 'push'
+    needs: pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # to sign the statement as this workflow run
+      attestations: write # to store the statement with the repository
+      artifact-metadata: write # asked for by actions/attest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-archives
+          path: archives
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: archives/fogline-*
+
+  # No token is stored anywhere. npm accepts this job's identity because the
+  # packages name this repository, this workflow file and this environment as
+  # their trusted publisher. npm adds a provenance statement to each package.
+  publish-npm:
+    name: publish to npm
+    if: github.event_name == 'push'
+    needs: [pack, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      id-token: write # the identity npm checks, in place of a stored token
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-tarballs
+          path: tarballs
+      # The launcher goes last, so it is never on the registry before the
+      # binaries it depends on. A version that is already there is skipped,
+      # which makes this step safe to run again after a failure. The registry
+      # is asked directly, so the answer does not depend on how npm is
+      # signed in: 200 means published, 404 means not, and anything else
+      # stops the release instead of guessing.
+      - name: Publish the platform packages, then the launcher
+        run: |
+          npm --version
+          for tarball in tarballs/fogline-cli-*.tgz tarballs/fogline-[0-9]*.tgz; do
+            package="$(tar -xzOf "$tarball" package/package.json |
+              node -p 'const m = JSON.parse(require("fs").readFileSync(0, "utf8")); m.name.replace("/", "%2F") + "/" + m.version')"
+            answer="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/$package")"
+            case "$answer" in
+              200) echo "$tarball is already on npm. Skipping." ;;
+              404) npm publish "$tarball" --access public ;;
+              *)
+                echo "The registry answered $answer for $package. Stopping."
+                exit 1
+                ;;
+            esac
+          done
+
+  github-release:
+    name: GitHub release
+    if: github.event_name == 'push'
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # to create the release and upload its files
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-archives
+          path: archives
+      - name: Create the release, or add to it when this is a re-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" archives/* --clobber
+          else
+            gh release create "$TAG" archives/* --verify-tag --prerelease --title "$TAG" --generate-notes
+          fi
+
+  # Installs the published version on clean machines, as a user would.
+  smoke:
+    name: smoke (${{ matrix.os }})
+    if: github.event_name == 'push'
+    needs: publish-npm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm, windows-latest]
+    permissions: {}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - name: Run the published package
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          cd "$RUNNER_TEMP"
+          # The registry can take a moment to serve a version it just accepted.
+          output=""
+          for attempt in 1 2 3 4 5 6; do
+            if output="$(npx --yes "fogline@$version" version)"; then
+              break
+            fi
+            echo "Attempt $attempt failed. Waiting 20 seconds."
+            sleep 20
+          done
+          echo "$output"
+          [ "$output" = "fogline $version" ]

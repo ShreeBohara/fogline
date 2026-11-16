@@ -98,6 +98,56 @@ jobs:
         working-directory: npm/fogline
         run: node --test test/launcher.test.js
 
+  # Builds the release binary on each of the five platforms and proves it
+  # works the way a user gets it: packed, installed from tarballs, run by npx.
+  pack-smoke:
+    name: pack smoke (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The release targets, each on its native runner (spec section 5.8).
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml, and the target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Build the release binary
+        run: cargo build --release --locked --target "$TARGET" -p fogline
+      - name: Check that the Linux binary is static
+        if: runner.os == 'Linux'
+        run: file "target/$TARGET/release/fogline" | tee /dev/stderr | grep -q static
+      - name: Test the packaging script
+        run: node --test scripts/npm-pack.test.mjs
+      - name: Pack, install into an empty project, run through npx
+        env:
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: node scripts/pack-smoke.mjs "target/$TARGET/release/fogline$EXE"
+
   deny:
     name: dependency policy
     runs-on: ubuntu-latest

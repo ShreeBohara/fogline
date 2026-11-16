@@ -101,6 +101,7 @@ xtask/                 developer commands: ci, viewer, schema, synth, bench
 packages/viewer/       React package and standalone shell; spike/ holds the renderer candidates
 npm/fogline/           launcher package; its lib/platforms.js is the one table of platforms
 scripts/npm-pack.mjs   turns release binaries into publishable npm folders
+scripts/pack-smoke.mjs installs those folders into an empty project and runs the result
 schemas/bundle-v0.schema.json
 tests/contract/        golden bundles the contract tests compare against (from M3)
 bench/corpus.toml      pinned benchmark repositories
@@ -396,6 +397,8 @@ Engineering rules:
 
 Traps to design for: GitHub's artifact upload drops the executable bit, so archive the binaries or `chmod` before packing. Windows cannot record that bit at all, so the Unix packages are packed on macOS or Linux, and the pack script refuses otherwise. Publish the platform packages before the launcher. Make the publish step safe to re-run.
 
+Known limit: Rust 1.100.0 cannot strip binaries on macOS. Its bundled `rust-objcopy` fails to load `libLLVM.dylib`, so `strip = true` only produces a warning there and the two macOS binaries ship about 200 KB larger. Measured on 2026-11-15 for `aarch64-apple-darwin`: `cargo build --release -p fogline` gives 879,624 bytes, and running the system `strip` on a copy gives 680,128. The nightly toolchain already has the fix. Nothing is worked around; the limit goes away when `rust-toolchain.toml` moves to a release that has it.
+
 ---
 
 ## 6. Work breakdown
@@ -429,9 +432,9 @@ The riskiest part goes first, while the binary is still trivial.
 | 2.1 | Launcher package with `node:test` tests: platform table, missing package, exit code, signal | Pass on Node 18 and 26 |
 | 2.2 ✓ | `scripts/npm-pack.mjs`: artifacts in, six publishable folders out. It checks that versions match, sets the executable bit, and runs `version` on the host's binary. | `node scripts/npm-pack.mjs --dry-run`, and `node --test scripts/npm-pack.test.mjs` |
 | 2.3 | CI job `pack-smoke` on the five runners: build, pack, install the tarballs into an empty project, run `npx fogline version` | Green on all five |
-| 2.4 | `release.yml` (§8) with a dry-run mode | A dry run yields five artifacts and six packed folders |
+| 2.4 | `release.yml` (§8) with a dry-run mode | A dry run yields five binaries, six npm tarballs, and five archives with their checksums |
 | 2.5 | **Name lock** (maintainer). Rename the repository if needed. `repository.url` is written once, in `npm/fogline/package.json`, and the pack script copies it into every package. | — |
-| 2.6 | Bootstrap. The maintainer publishes 0.0.1 by hand from the CI-built artifacts, then adds a trusted publisher to each of the six packages. Tag `v0.0.2`; CI publishes with no token. The publisher setting expires unless a publish succeeds within two days. | `npm view fogline@0.0.2 dist.attestations` is present; the release smoke job is green on five runners |
+| 2.6 | Bootstrap. The maintainer publishes 0.0.1 by hand from the tarballs of a dry run, then adds a trusted publisher to each of the six packages: this repository, the workflow `release.yml`, the environment `npm`. Tag `v0.0.2`; CI publishes with no token. The publisher setting expires unless a publish succeeds within two days. | `npm view fogline@0.0.2 dist.attestations` is present; the release smoke job is green on five runners |
 | 2.7 | ADR-0004: distribution | Merged |
 
 ### M3 · Scan — 2.5 days
@@ -528,24 +531,29 @@ Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today fr
 | `rust` | Linux, macOS, Windows | rustfmt, clippy with warnings as errors, cargo-nextest. The black-box contract tests run here: they are integration tests of the `fogline` crate. |
 | `viewer` | Linux | Biome, type check, Vitest, build; Playwright from M5 |
 | `launcher` | Linux on Node 18 and 26, Windows on Node 26 | The launcher's tests. Node 18 is the oldest version it supports. |
-| `pack-smoke` | The five runners in §5.8 | Build, pack, install the tarballs, `npx fogline version`, one fixture scan |
+| `pack-smoke` | The five runners in §5.8 | Build the release binary, run the pack script's tests, then `scripts/pack-smoke.mjs`: pack, install the tarballs into an empty project with install scripts off, and compare `npx fogline version --json` with what the binary prints when run directly. The Linux rows also check that the binary is static. From M3, one fixture scan. |
 | `schema-drift` | Linux | Regenerates the schema and the TypeScript types; fails on any diff |
 | `deny` | Linux | cargo-deny: advisories, licences, and a ban on HTTP client crates in the engine |
 | `workflows` | Linux | zizmor and actionlint on the workflows |
 
-**`release.yml`**, on a `v*` tag, or by hand as a dry run:
+**`release.yml`** runs a real release on a `v*` tag. Anything else is a dry run, which stops after step 3 and keeps what it built as workflow artifacts: started by hand, or by a pull request that changes the workflow, the pack script or the launcher.
 
-1. `viewer` — build the viewer once.
-2. `build` ×5 — on the native runners, with `--locked`; attach a build-provenance attestation to each binary.
-3. `publish-npm` — pack with `scripts/npm-pack.mjs`; publish the five platform packages, then the launcher, through npm trusted publishing. It skips versions that already exist.
-4. `github-release` — a pre-release with the archives and checksums.
-5. `smoke` ×5 — on clean runners: `npx --yes fogline@<version> version`, then a fixture scan.
+1. `check` — the package manifests are consistent, and on a release the tag is `v` plus the version in `Cargo.toml`. It fails before any build starts.
+2. `build` ×5 — on the native runners, with `--locked` and no build cache.
+3. `pack` — `scripts/npm-pack.mjs` and `npm pack` make six tarballs; the binaries also go into five archives with a `SHA256SUMS` file.
+4. `attest` — a build-provenance attestation for each archive, so a download can be checked with `gh attestation verify`. npm adds its own provenance to each package in the next step.
+5. `publish-npm` — publish the five platform packages, then the launcher, through npm trusted publishing. It asks the registry whether each version exists and skips the ones that do.
+6. `github-release` — a pre-release with the archives and checksums.
+7. `smoke` ×5 — on clean runners: `npx --yes fogline@<version> version`, then a fixture scan from M3.
+
+The binary does not embed the viewer yet, so there is no viewer build here. Task 5.2 adds it as the first step.
 
 If the smoke job fails after publishing, deprecate that version on npm and fix forward.
 
 Supply-chain rules:
 
 - No long-lived registry token exists anywhere. Publishing uses OIDC. After bootstrap, each package's settings require 2FA and disallow tokens.
+- Only `attest` and `publish-npm` can get an identity token. Neither checks out the repository, builds anything or runs its scripts: they act on files that earlier jobs made. `publish-npm` runs in a GitHub environment named `npm`, which the trusted-publisher settings name too, so a required reviewer on that environment becomes an approval step for every release.
 - Third-party actions are pinned to commit SHAs, and Dependabot updates them. Workflow permissions default to none, with per-job grants.
 - Lockfiles are committed. CI installs with `--frozen-lockfile` and builds with `--locked`.
 - pnpm's release-age policy stays on, so a package published hours ago is not installed. When it blocks a version, take the previous release; do not add an exclusion. Dependabot waits seven days for the same reason.
@@ -560,7 +568,8 @@ Facts this section relies on, checked today:
 | Biome's `@biomejs/biome` has a JavaScript `bin`, pinned `optionalDependencies` per platform, no install scripts, and platform packages with `os`, `cpu` and `libc` | [npm registry](https://www.npmjs.com/package/@biomejs/biome) |
 | cargo-dist 0.34.0 is maintained. Its npm package "will fetch your prebuilt archives" after install, and it publishes with an `NPM_TOKEN` secret. | [dist book](https://axodotdev.github.io/cargo-dist/book/installers/npm.html) |
 | A crates.io trusted publisher "can only be created after an initial manual publishing of a crate" | [RFC 3691](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html) |
-| Current action majors: checkout 7, setup-node 7, upload-artifact 7, download-artifact 8, attest-build-provenance 4, pnpm/action-setup 6 | GitHub releases |
+| Current action majors: checkout 7, setup-node 7, upload-artifact 7, download-artifact 8, attest 4, pnpm/action-setup 6. `attest-build-provenance` 4 is now a wrapper around `actions/attest`, and its README sends new workflows there. | GitHub releases |
+| An install with only the launcher and one platform tarball succeeds while the other four platform packages do not exist on the registry: npm treats an optional dependency it cannot find as skipped. | `node scripts/pack-smoke.mjs target/release/fogline`, run on 2026-11-15 with npm 11.20.0 |
 
 ---
 

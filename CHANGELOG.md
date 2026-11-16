@@ -12,4 +12,5 @@ Notable changes, newest first. The format follows [Keep a Changelog](https://kee
 - A viewer shell that looks for a bundle and reports what it found.
 - CI for Linux, macOS and Windows, a dependency policy, and workflow linting.
 - An npm launcher that finds the binary for the machine, runs it, and passes exit codes and signals through. Nothing is published to npm yet.
-- A packaging script that turns built binaries into the launcher package and five platform packages.
+- A packaging script that turns built binaries into the launcher package and five platform packages, and a smoke test, run on all five platforms, that installs them into an empty project.
+- A release workflow with a dry-run mode. A dry run builds five binaries and packs them into six npm tarballs and five archives, and publishes nothing.

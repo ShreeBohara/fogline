@@ -7,7 +7,7 @@ Fogline is pre-alpha. Before proposing or changing anything, read `docs/plan.md`
 - `cargo xtask ci` runs everything CI runs. Run it before pushing. `--skip-viewer` leaves out the Node checks.
 - `cargo test -p fogline --test contract` runs the black-box contract tests. Set `FOGLINE_BIN` to point them at another binary.
 - `pnpm --filter @fogline/viewer dev` starts the viewer's dev server.
-- `node scripts/npm-pack.mjs --dry-run` lists the npm packages a release would publish.
+- `node scripts/npm-pack.mjs --dry-run` lists the npm packages a release would publish. `node scripts/pack-smoke.mjs target/release/fogline` installs them into an empty project and runs the result.
 - Rust comes from `rust-toolchain.toml` through rustup. Node comes from `.nvmrc` (`nvm use`); pnpm's version comes from `packageManager` in `package.json`.
 
 ## Rules
