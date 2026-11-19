@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 // The launcher's own table of platforms. Reading it here means the launcher
@@ -140,10 +140,13 @@ export function plan({ version, template, artifacts, allowMissing }) {
       return { to, from: path.join(LAUNCHER, to), executable: binEntries.has(to) };
     }),
   );
+  // The folders are sorted into `platform/` and `launcher/`, so that whatever
+  // publishes them can take the platform packages first without knowing any
+  // package's name.
   const packages = [
     {
       name: template.name,
-      dir: template.name,
+      dir: `launcher/${template.name}`,
       manifest: launcherManifest(template, version),
       files: [
         ...launcherFiles,
@@ -174,7 +177,7 @@ export function plan({ version, template, artifacts, allowMissing }) {
     }
     packages.push({
       name,
-      dir: `cli-${platform.os}-${platform.cpu}`,
+      dir: `platform/cli-${platform.os}-${platform.cpu}`,
       platform,
       manifest: platformManifest(platform, template, version),
       files: [
@@ -196,6 +199,22 @@ export function plan({ version, template, artifacts, allowMissing }) {
   return packages;
 }
 
+/**
+ * Removes a scratch folder, and never fails the caller over it.
+ *
+ * On Windows a file can stay locked for a moment after the program that used
+ * it has ended. The removal is retried, and a folder that still cannot be
+ * removed is left behind with a warning: tidying up must not turn a run that
+ * passed into one that failed.
+ */
+export function removeScratch(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (error) {
+    console.warn(`Could not remove ${dir}: ${error.message}`);
+  }
+}
+
 /** Runs `version --json` on a binary and returns what it reports. */
 function askBinary(binary) {
   // Downloaded build artifacts lose their executable bit, so run a private
@@ -214,7 +233,7 @@ function askBinary(binary) {
     }
     return JSON.parse(result.stdout);
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    removeScratch(scratch);
   }
 }
 
@@ -344,8 +363,12 @@ function main() {
   console.log(report);
 }
 
-// Run only when this file is the program, not when a test imports it.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run only when this file is the program, not when a test imports it. Real
+// paths are compared, because Node follows symlinks for a module's own
+// address and not for the path in argv. Comparing them as given would make
+// a checkout reached through a symlink do nothing here and still exit with 0.
+const startedAs = process.argv[1] ? fs.realpathSync(process.argv[1]) : "";
+if (startedAs === fileURLToPath(import.meta.url)) {
   try {
     main();
   } catch (error) {

@@ -116,6 +116,25 @@ fn ci(args: &[String]) -> Result<(), String> {
     step(
         "packaging: test",
         node(&["--test", "scripts/npm-pack.test.mjs"]),
+    )?;
+
+    // The same smoke test CI runs on five platforms, here for this one: the
+    // release binary, packed, installed from tarballs and run through npx.
+    // It asks the npm registry about the other four platform packages.
+    step(
+        "packaging: build the release binary",
+        cargo(&["build", "--release", "--locked", "--package", "fogline"]),
+    )?;
+    let binary = root
+        .join("target")
+        .join("release")
+        .join(format!("fogline{}", env::consts::EXE_SUFFIX));
+    let binary = binary
+        .to_str()
+        .ok_or_else(|| format!("the path {} is not valid UTF-8", binary.display()))?;
+    step(
+        "packaging: smoke",
+        node(&["scripts/pack-smoke.mjs", binary]),
     )
 }
 

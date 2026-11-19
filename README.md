@@ -26,6 +26,8 @@ Run everything CI runs:
 cargo xtask ci
 ```
 
+Its last step installs the packed binary into an empty project, which needs the npm registry.
+
 Leave out everything that needs Node:
 
 ```bash
@@ -48,7 +50,7 @@ cargo run -p fogline -- version --json
 | `xtask` | Developer commands, written in Rust so they behave the same on every OS. |
 | `packages/viewer` | The viewer: React and TypeScript, built with Vite. |
 | `npm/fogline` | The npm launcher: a script with no dependencies that finds the binary for the machine and runs it. |
-| `scripts` | `npm-pack.mjs` turns built binaries into the npm packages. |
+| `scripts` | `npm-pack.mjs` turns built binaries into the npm packages, and `pack-smoke.mjs` installs them into an empty project to prove they work. |
 | `docs` | The plan, the phase specs and the decision records. |
 
 ## Ground rules

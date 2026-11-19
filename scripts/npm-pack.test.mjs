@@ -4,6 +4,7 @@
 // script would start the host's binary.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import {
   PackError,
   pack,
   platformManifest,
+  removeScratch,
   workspaceVersion,
 } from "./npm-pack.mjs";
 
@@ -44,7 +46,7 @@ const TEMPLATE = {
 /** A scratch folder that is removed when the test ends. */
 function scratch(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fogline-pack-test-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   return dir;
 }
 
@@ -130,18 +132,20 @@ test("packs the launcher and all five platform packages", { skip: ON_WINDOWS }, 
 
   const result = pack({ artifacts, out, ask: asExpected });
 
-  assert.deepEqual(fs.readdirSync(out).sort(), [
+  // Two groups, so a publisher can take the platform packages first.
+  assert.deepEqual(fs.readdirSync(out).sort(), ["launcher", "platform"]);
+  assert.deepEqual(fs.readdirSync(path.join(out, "launcher")), ["fogline"]);
+  assert.deepEqual(fs.readdirSync(path.join(out, "platform")).sort(), [
     "cli-darwin-arm64",
     "cli-darwin-x64",
     "cli-linux-arm64",
     "cli-linux-x64",
     "cli-win32-x64",
-    "fogline",
   ]);
   assert.match(result.report, /Wrote 6 packages to /);
 
   for (const platform of PLATFORMS) {
-    const folder = path.join(out, `cli-${platform.os}-${platform.cpu}`);
+    const folder = path.join(out, "platform", `cli-${platform.os}-${platform.cpu}`);
     const binary = path.join(folder, "bin", binaryName(platform));
     assert.deepEqual(readJson(path.join(folder, "package.json")).name, packageName(platform));
     assert.equal(readJson(path.join(folder, "package.json")).version, VERSION);
@@ -151,7 +155,7 @@ test("packs the launcher and all five platform packages", { skip: ON_WINDOWS }, 
     assert.ok(fs.existsSync(path.join(folder, "LICENSE")));
   }
 
-  const launcher = path.join(out, "fogline");
+  const launcher = path.join(out, "launcher", "fogline");
   const manifest = readJson(path.join(launcher, "package.json"));
   assert.equal(manifest.version, VERSION);
   assert.equal(Object.keys(manifest.optionalDependencies).length, 5);
@@ -178,11 +182,12 @@ test("packs only what is present when missing binaries are allowed", (t) => {
 
   const result = pack({ artifacts, out, allowMissing: true, ask: asExpected });
 
-  assert.deepEqual(fs.readdirSync(out).sort(), [`cli-${ONE.os}-${ONE.cpu}`, "fogline"]);
+  assert.deepEqual(fs.readdirSync(path.join(out, "platform")), [`cli-${ONE.os}-${ONE.cpu}`]);
+  assert.deepEqual(fs.readdirSync(path.join(out, "launcher")), ["fogline"]);
   assert.match(result.report, /Wrote 2 packages to /);
   assert.match(result.report, /skipped: no fogline-/);
   // The launcher still names all five, so it is the same file a release ships.
-  const manifest = readJson(path.join(out, "fogline", "package.json"));
+  const manifest = readJson(path.join(out, "launcher", "fogline", "package.json"));
   assert.equal(Object.keys(manifest.optionalDependencies).length, 5);
 });
 
@@ -274,4 +279,35 @@ test("a host binary with the wrong version or target stops the pack", { skip: !H
       error instanceof PackError && error.message.includes("built for wasm32-unknown-unknown"),
   );
   assert.equal(fs.existsSync(out), false);
+});
+
+test("the script still runs when the checkout is reached through a symlink", {
+  skip: ON_WINDOWS,
+}, (t) => {
+  // Node follows symlinks for a module's own address and not for the path it
+  // was started with. A guard that compared the two as given would decide
+  // this file was only being imported, do nothing, and exit with 0.
+  const dir = scratch(t);
+  const link = path.join(dir, "checkout");
+  fs.symlinkSync(ROOT, link);
+
+  const output = execFileSync(
+    process.execPath,
+    [path.join(link, "scripts", "npm-pack.mjs"), "--dry-run"],
+    { encoding: "utf8" },
+  );
+
+  assert.match(output, /Dry run: nothing was written\./);
+});
+
+test("the workflows and deny.toml list the same five targets as the platform table", () => {
+  // These files cannot read the table, so they repeat it. This test is what
+  // keeps the copies from drifting.
+  const expected = PLATFORMS.map((platform) => platform.target).sort();
+  const triple = /\b(?:aarch64|x86_64)-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?\b/g;
+
+  for (const file of [".github/workflows/ci.yml", ".github/workflows/release.yml", "deny.toml"]) {
+    const text = fs.readFileSync(path.join(ROOT, file), "utf8");
+    assert.deepEqual([...new Set(text.match(triple))].sort(), expected, file);
+  }
 });
