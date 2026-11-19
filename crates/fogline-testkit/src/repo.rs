@@ -49,6 +49,19 @@ struct Sandbox {
 }
 
 impl Sandbox {
+    /// Makes the temporary directory, with an empty `repo/` and a `home/`
+    /// that holds an empty git configuration.
+    fn new() -> io::Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("fogline-fixture-")
+            .tempdir()?;
+        let sandbox = Sandbox { dir };
+        fs::create_dir_all(sandbox.repo())?;
+        fs::create_dir_all(sandbox.home())?;
+        fs::write(sandbox.home().join("gitconfig"), "")?;
+        Ok(sandbox)
+    }
+
     fn repo(&self) -> PathBuf {
         self.dir.path().join("repo")
     }
@@ -110,6 +123,25 @@ fn run(mut command: Command, input: Option<&str>) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// The commit HEAD points to, or `None` in a repository with no commits.
+fn head_of(sandbox: &Sandbox) -> io::Result<Option<String>> {
+    let output = sandbox
+        .git(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .stdin(Stdio::null())
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )),
+        // `--verify --quiet` exits with 1, silently, when HEAD names no commit.
+        Some(1) => Ok(None),
+        _ => Err(io::Error::other(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
 /// Builds a git repository one commit at a time.
 #[derive(Debug)]
 pub struct RepoBuilder {
@@ -119,14 +151,7 @@ pub struct RepoBuilder {
 impl RepoBuilder {
     /// Starts an empty repository on the branch `main`.
     pub fn new() -> io::Result<Self> {
-        let dir = tempfile::Builder::new()
-            .prefix("fogline-fixture-")
-            .tempdir()?;
-        let sandbox = Sandbox { dir };
-        fs::create_dir_all(sandbox.repo())?;
-        fs::create_dir_all(sandbox.home())?;
-        fs::write(sandbox.home().join("gitconfig"), "")?;
-
+        let sandbox = Sandbox::new()?;
         run(sandbox.git(["init", "--quiet"]), None)?;
         // `git init -b` needs git 2.28. This works on every version.
         run(
@@ -173,9 +198,10 @@ impl RepoBuilder {
         run(self.sandbox.git(["rev-parse", "HEAD"]), None)
     }
 
-    /// Finishes the recipe and hands over the repository.
+    /// Finishes the recipe and hands over the repository. A recipe with no
+    /// commits gives a repository whose HEAD names no commit.
     pub fn finish(self) -> io::Result<Fixture> {
-        let head = run(self.sandbox.git(["rev-parse", "HEAD"]), None)?;
+        let head = head_of(&self.sandbox)?;
         Ok(Fixture {
             sandbox: self.sandbox,
             head,
@@ -188,18 +214,36 @@ impl RepoBuilder {
 #[derive(Debug)]
 pub struct Fixture {
     sandbox: Sandbox,
-    head: String,
+    head: Option<String>,
 }
 
 impl Fixture {
-    /// The repository's work tree.
+    /// The repository's folder: its work tree, or the repository itself for
+    /// a bare clone.
     pub fn path(&self) -> PathBuf {
         self.sandbox.repo()
     }
 
-    /// The commit id of HEAD.
-    pub fn head(&self) -> &str {
-        &self.head
+    /// The commit id of HEAD, or `None` when nothing has been committed.
+    pub fn head(&self) -> Option<&str> {
+        self.head.as_deref()
+    }
+
+    /// Clones this fixture into a new temporary directory, passing `options`
+    /// to `git clone`: `["--bare"]` for a bare copy, or
+    /// `["--depth", "1", "--no-local"]` for a shallow one. (git ignores
+    /// `--depth` when it clones a local path directly; `--no-local` makes it
+    /// use its normal transport, which honours it.)
+    pub fn git_clone(&self, options: &[&str]) -> io::Result<Fixture> {
+        let sandbox = Sandbox::new()?;
+        let source = self.path();
+        let mut args: Vec<&OsStr> = vec![OsStr::new("clone"), OsStr::new("--quiet")];
+        args.extend(options.iter().map(OsStr::new));
+        // Clone into `repo/` itself, which is empty, so `path()` finds it.
+        args.extend([source.as_os_str(), OsStr::new(".")]);
+        run(sandbox.git(args), None)?;
+        let head = head_of(&sandbox)?;
+        Ok(Fixture { sandbox, head })
     }
 
     /// Runs git inside the fixture and returns its trimmed standard output.

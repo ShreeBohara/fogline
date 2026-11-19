@@ -14,3 +14,4 @@ Notable changes, newest first. The format follows [Keep a Changelog](https://kee
 - An npm launcher that finds the binary for the machine, runs it, and passes exit codes and signals through. Nothing is published to npm yet.
 - A packaging script that turns built binaries into the launcher package and five platform packages, and a smoke test, run on all five platforms, that installs them into an empty project.
 - A release workflow with a dry-run mode. A dry run builds five binaries and packs them into six npm tarballs and five archives, and publishes nothing.
+- `fogline scan` finds the repository from any folder inside it, bare and shallow repositories included, and exits with 3 outside a repository or in one with no commits, and with 4 when git is missing or older than 2.25. It ignores `GIT_DIR` and similar variables, so it reads the folder it was given even when started from a git hook. Counting files and history comes next.

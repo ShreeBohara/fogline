@@ -8,7 +8,8 @@
 
 use std::fmt;
 use std::io;
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 
 /// A git release number, such as 2.52.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +20,15 @@ pub struct Version {
 }
 
 impl Version {
+    /// The oldest git the engine supports. `git rev-parse
+    /// --show-object-format` first appeared in 2.25.0: git's own
+    /// `builtin/rev-parse.c` has it at the v2.25.0 tag and not at v2.24.0.
+    pub const MINIMUM: Version = Version {
+        major: 2,
+        minor: 25,
+        patch: 0,
+    };
+
     /// Reads the version out of what `git --version` prints.
     ///
     /// Vendors add their own suffixes, so only the leading numbers count:
@@ -60,7 +70,23 @@ pub enum Error {
     /// `git --version` printed something that is not a version.
     #[error("`git --version` printed {output:?}, which is not a version")]
     UnrecognizedVersion { output: String },
+    /// git succeeded but printed something the engine cannot read.
+    #[error("`git {command}` printed {output:?}, which fogline cannot read")]
+    Unexpected { command: String, output: String },
 }
+
+/// Variables that would make git read a repository other than the one it is
+/// run in. Git sets some of them itself while it runs hooks, so a fogline
+/// started from a hook would otherwise scan the wrong repository.
+const REDIRECTING_VARIABLES: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+];
 
 /// Starts a git invocation with the pinned environment and configuration.
 ///
@@ -69,10 +95,15 @@ pub enum Error {
 /// - `LC_ALL=C`: messages and sorting do not depend on the user's locale.
 /// - `core.quotepath=false`, `i18n.logOutputEncoding=UTF-8`: paths and
 ///   messages arrive as raw UTF-8 bytes.
+/// - The variables in [`REDIRECTING_VARIABLES`] are removed, so the folder
+///   git runs in is the only thing that decides which repository it reads.
 ///
 /// Standard input is closed; callers that feed git on stdin replace it.
 pub fn command() -> Command {
     let mut command = Command::new("git");
+    for variable in REDIRECTING_VARIABLES {
+        command.env_remove(variable);
+    }
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -81,6 +112,26 @@ pub fn command() -> Command {
         .args(["-c", "i18n.logOutputEncoding=UTF-8"])
         .stdin(Stdio::null());
     command
+}
+
+/// Runs git with `args` in the folder `dir` and collects what it printed.
+///
+/// A git that exits with an error is still `Ok` here, because what a failure
+/// means depends on the question: callers look at the exit status.
+pub fn output_in(dir: &Path, args: &[&str]) -> Result<Output, Error> {
+    command()
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(|err| {
+            // Starting a process in a folder that does not exist also fails
+            // with "not found". Only call git missing when the folder is there.
+            if err.kind() == io::ErrorKind::NotFound && dir.is_dir() {
+                Error::NotFound
+            } else {
+                Error::Io(err)
+            }
+        })
 }
 
 /// Finds out which git is installed.
@@ -155,6 +206,13 @@ mod tests {
     }
 
     #[test]
+    fn the_minimum_is_2_25_0() {
+        assert_eq!(Version::MINIMUM, version(2, 25, 0));
+        assert!(version(2, 24, 9) < Version::MINIMUM);
+        assert!(version(2, 25, 0) >= Version::MINIMUM);
+    }
+
+    #[test]
     fn prints_three_numbers() {
         assert_eq!(version(2, 52, 0).to_string(), "2.52.0");
     }
@@ -194,6 +252,38 @@ mod tests {
                 "i18n.logOutputEncoding=UTF-8"
             ]
         );
+    }
+
+    #[test]
+    fn removes_the_variables_that_point_git_elsewhere() {
+        let command = command();
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+            assert!(
+                removed.iter().any(|key| key == variable),
+                "{variable} should be removed"
+            );
+        }
+        assert_eq!(removed.len(), REDIRECTING_VARIABLES.len());
+    }
+
+    #[test]
+    fn output_in_reports_failure_through_the_exit_status() {
+        let here = std::env::current_dir().unwrap();
+        let output =
+            output_in(&here, &["rev-parse", "--verify", "--quiet", "no-such-ref"]).unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn output_in_does_not_blame_git_for_a_missing_folder() {
+        let missing = Path::new("fogline-test-no-such-folder");
+        let error = output_in(missing, &["--version"]).unwrap_err();
+        assert!(matches!(error, Error::Io(_)), "got {error:?}");
     }
 
     #[test]
