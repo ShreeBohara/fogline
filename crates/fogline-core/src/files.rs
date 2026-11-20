@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::classify::{self, Flags};
 use crate::git::{self, Version};
-use crate::repo::Repository;
+use crate::repo::{Reach, Repository};
 
 /// One file at HEAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,7 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
     // anything is missing. With everything present, the commands below
     // have nothing to download.
     if repo.partial_clone {
-        let missing = missing_objects(repo)?;
+        let missing = repo.missing_objects(Reach::Head)?;
         if missing > 0 {
             return Err(Error::MissingObjects { missing });
         }
@@ -95,7 +95,7 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
 
     let tree_args = ["ls-tree", "-r", "-l", "-z", head];
     let tree = git::succeeded(&tree_args, git::output_in(&repo.root, &tree_args)?)?.stdout;
-    let tree_entries = parse_tree(&tree).ok_or_else(|| unexpected(&tree_args, &tree))?;
+    let tree_entries = parse_tree(&tree).ok_or_else(|| git::unexpected(&tree_args, &tree))?;
 
     // The id of the empty tree. It differs between SHA-1 and SHA-256
     // repositories, so git is asked. This computes the id and writes nothing.
@@ -103,7 +103,7 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
     let output = git::succeeded(&EMPTY_TREE, git::output_in(&repo.root, &EMPTY_TREE)?)?;
     let empty_tree = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if empty_tree.is_empty() {
-        return Err(unexpected(&EMPTY_TREE, &output.stdout).into());
+        return Err(git::unexpected(&EMPTY_TREE, &output.stdout).into());
     }
 
     let numstat_args = [
@@ -126,7 +126,8 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
         git::output_in_with(&repo.root, &pin_attributes, &numstat_args)?,
     )?
     .stdout;
-    let line_counts = parse_numstat(&numstat).ok_or_else(|| unexpected(&numstat_args, &numstat))?;
+    let line_counts =
+        parse_numstat(&numstat).ok_or_else(|| git::unexpected(&numstat_args, &numstat))?;
 
     let mut files = Files {
         entries: Vec::with_capacity(tree_entries.len()),
@@ -158,7 +159,7 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
             (0, None)
         } else {
             let lines = *line_counts.get(entry.path).ok_or_else(|| {
-                unexpected(
+                git::unexpected(
                     &numstat_args,
                     format!("no line count for {path}").as_bytes(),
                 )
@@ -186,30 +187,6 @@ pub fn list(repo: &Repository) -> Result<Files, Error> {
     Ok(files)
 }
 
-/// Counts the objects that the commit's files and folders need and the
-/// repository does not have.
-///
-/// `rev-list --missing=print` lists them instead of downloading them. It
-/// turns downloading off itself, and already did at git 2.25.0, so this is
-/// safe on every git the engine supports.
-fn missing_objects(repo: &Repository) -> Result<u64, git::Error> {
-    let args = [
-        "rev-list",
-        "--objects",
-        "--missing=print",
-        "--no-walk",
-        repo.head.as_str(),
-    ];
-    let output = git::succeeded(&args, git::output_in(&repo.root, &args)?)?;
-    // A missing object is printed as `?` followed by its id.
-    let missing = output
-        .stdout
-        .split(|&byte| byte == b'\n')
-        .filter(|line| line.starts_with(b"?"))
-        .count();
-    Ok(missing as u64)
-}
-
 /// What an entry of a commit's tree is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -235,7 +212,7 @@ struct TreeEntry<'a> {
 /// anything that does not have this shape.
 fn parse_tree(output: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
     let mut entries = Vec::new();
-    for record in records(output)? {
+    for record in git::records(output)? {
         // The first tab ends the fixed fields. A path may hold tabs itself.
         let tab = record.iter().position(|&byte| byte == b'\t')?;
         let (meta, path) = (&record[..tab], &record[tab + 1..]);
@@ -256,8 +233,8 @@ fn parse_tree(output: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
         }
         let (kind, bytes) = match (kind, mode) {
             (b"commit", _) => (Kind::Submodule, 0),
-            (b"blob", b"120000") => (Kind::Link, number(size)?),
-            (b"blob", _) => (Kind::File, number(size)?),
+            (b"blob", b"120000") => (Kind::Link, git::number(size)?),
+            (b"blob", _) => (Kind::File, git::number(size)?),
             _ => return None,
         };
         entries.push(TreeEntry { kind, bytes, path });
@@ -273,7 +250,7 @@ fn parse_tree(output: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
 /// that does not have this shape.
 fn parse_numstat(output: &[u8]) -> Option<HashMap<&[u8], i64>> {
     let mut line_counts = HashMap::new();
-    for record in records(output)? {
+    for record in git::records(output)? {
         // Split at the first two tabs only. A path may hold tabs itself.
         let mut fields = record.splitn(3, |&byte| byte == b'\t');
         let (added, deleted, path) = (fields.next()?, fields.next()?, fields.next()?);
@@ -283,41 +260,13 @@ fn parse_numstat(output: &[u8]) -> Option<HashMap<&[u8], i64>> {
         let lines = match (added, deleted) {
             (b"-", b"-") => -1,
             _ => {
-                number(deleted)?;
-                i64::try_from(number(added)?).ok()?
+                git::number(deleted)?;
+                i64::try_from(git::number(added)?).ok()?
             }
         };
         line_counts.insert(path, lines);
     }
     Some(line_counts)
-}
-
-/// Splits `-z` output into its records. Every record ends with a NUL, so
-/// output that ends any other way was cut short, and gives `None`.
-fn records(output: &[u8]) -> Option<Vec<&[u8]>> {
-    if output.is_empty() {
-        return Some(Vec::new());
-    }
-    let body = output.strip_suffix(&[0])?;
-    Some(body.split(|&byte| byte == 0).collect())
-}
-
-/// Reads a number made of ASCII digits and nothing else.
-fn number(digits: &[u8]) -> Option<u64> {
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    std::str::from_utf8(digits).ok()?.parse().ok()
-}
-
-/// The error for output that could not be read. Only the start of the
-/// output goes into the message: the whole of it can be megabytes.
-fn unexpected(args: &[&str], output: &[u8]) -> git::Error {
-    let start = &output[..output.len().min(200)];
-    git::Error::Unexpected {
-        command: args.join(" "),
-        output: String::from_utf8_lossy(start).into_owned(),
-    }
 }
 
 #[cfg(test)]
@@ -451,23 +400,6 @@ mod tests {
                 "{:?}",
                 String::from_utf8_lossy(output)
             );
-        }
-    }
-
-    #[test]
-    fn only_digits_are_a_number() {
-        assert_eq!(number(b"0"), Some(0));
-        assert_eq!(number(b"1122175"), Some(1_122_175));
-        for text in [
-            &b""[..],
-            b"-",
-            b"+1",
-            b"-1",
-            b" 1",
-            b"1.0",
-            b"99999999999999999999999",
-        ] {
-            assert_eq!(number(text), None, "{:?}", String::from_utf8_lossy(text));
         }
     }
 }

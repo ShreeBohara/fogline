@@ -28,7 +28,7 @@ impl ObjectFormat {
     }
 
     /// Length of an object id in hexadecimal digits.
-    fn hex_len(self) -> usize {
+    pub(crate) fn hex_len(self) -> usize {
         match self {
             Self::Sha1 => 40,
             Self::Sha256 => 64,
@@ -59,6 +59,55 @@ pub struct Repository {
     /// a command asks for it, so everything that reads objects checks this
     /// first.
     pub partial_clone: bool,
+}
+
+/// How far a search for missing objects goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// The files and folders of the commit HEAD points to.
+    Head,
+    /// Those of every commit HEAD can reach.
+    History,
+}
+
+impl Repository {
+    /// Counts the objects that this repository should hold and does not.
+    /// Only a partial clone lacks any.
+    ///
+    /// A partial clone leaves objects on its remote, and git downloads one
+    /// whenever a command asks for it: a network request, and a write into
+    /// the repository. The engine may do neither, so before it reads
+    /// objects in a partial clone it counts what is missing, and stops if
+    /// that is more than nothing.
+    ///
+    /// `rev-list --missing=print` lists missing objects instead of
+    /// downloading them. It turns downloading off itself, and already did
+    /// at git 2.25.0, so this is safe on every git the engine supports.
+    /// Where a folder is missing, what is inside it cannot be seen, so the
+    /// count is then a lower bound.
+    pub(crate) fn missing_objects(&self, reach: Reach) -> Result<u64, git::Error> {
+        // `--no-object-names` leaves the paths out of the listing, which
+        // for a long history is tens of megabytes of text nobody reads.
+        let mut args = vec![
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+        ];
+        if reach == Reach::Head {
+            // Look at this one commit and not at the ones before it.
+            args.push("--no-walk");
+        }
+        args.push(self.head.as_str());
+        let output = git::succeeded(&args, git::output_in(&self.root, &args)?)?;
+        // A missing object is printed as `?` followed by its id.
+        let missing = output
+            .stdout
+            .split(|&byte| byte == b'\n')
+            .filter(|line| line.starts_with(b"?"))
+            .count();
+        Ok(missing as u64)
+    }
 }
 
 /// Why there is no repository to scan.
@@ -144,7 +193,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     }
     let output = git::succeeded(&HEAD, output)?;
     let head = lossy(&output.stdout);
-    if !is_object_id(&head, facts.object_format) {
+    if !is_object_id(head.as_bytes(), facts.object_format) {
         return Err(unexpected(&HEAD, &output).into());
     }
 
@@ -250,11 +299,11 @@ fn display_name(root: &Path, in_git_folder: bool) -> String {
 }
 
 /// True for an id of the right length made of lowercase hexadecimal digits.
-fn is_object_id(text: &str, format: ObjectFormat) -> bool {
+pub(crate) fn is_object_id(text: &[u8], format: ObjectFormat) -> bool {
     text.len() == format.hex_len()
         && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 fn unexpected(args: &[&str], output: &Output) -> git::Error {
@@ -395,10 +444,13 @@ mod tests {
     #[test]
     fn checks_the_shape_of_an_object_id() {
         let sha1 = "822e3536cbae5f3404efab40519ba1de1102e6a0";
-        assert!(is_object_id(sha1, ObjectFormat::Sha1));
-        assert!(!is_object_id(sha1, ObjectFormat::Sha256));
-        assert!(!is_object_id(&sha1.to_uppercase(), ObjectFormat::Sha1));
-        assert!(!is_object_id("HEAD", ObjectFormat::Sha1));
+        assert!(is_object_id(sha1.as_bytes(), ObjectFormat::Sha1));
+        assert!(!is_object_id(sha1.as_bytes(), ObjectFormat::Sha256));
+        assert!(!is_object_id(
+            sha1.to_uppercase().as_bytes(),
+            ObjectFormat::Sha1
+        ));
+        assert!(!is_object_id(b"HEAD", ObjectFormat::Sha1));
     }
 
     #[test]

@@ -60,6 +60,13 @@ pub const MERGES: usize = 1;
 pub const LINES: u64 = 40;
 pub const BINARY_FILES: usize = 1;
 
+/// The lines the eight commits that are not merges added and deleted, all
+/// files together. They leave 41 lines and HEAD has 40: git counts the
+/// path a symbolic link points to as one added line, and the link has no
+/// lines of its own. The submodule entry is not counted at all.
+pub const ADDED: u64 = 46;
+pub const DELETED: u64 = 5;
+
 const ADA: Identity = Identity {
     name: "Ada Example",
     email: "ada@example.com",

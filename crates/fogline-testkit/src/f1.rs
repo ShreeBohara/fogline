@@ -26,6 +26,11 @@ pub const COMMITS: usize = 5;
 /// The lines of all six files together.
 pub const LINES: u64 = 30;
 
+/// The lines the five commits added and deleted, all files together. One
+/// line was ever deleted: the fourth commit rewrote a line of `util.py`.
+pub const ADDED: u64 = 31;
+pub const DELETED: u64 = 1;
+
 const ADA: Identity = Identity {
     name: "Ada Example",
     email: "ada@example.com",

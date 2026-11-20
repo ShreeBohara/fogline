@@ -199,17 +199,17 @@ fn building_f3_twice_gives_the_same_repository() {
     assert_eq!(first.head(), second.head());
 }
 
-/// The objects that HEAD's files and folders need and the clone lacks,
-/// listed by a command that never downloads.
-fn missing_at_head(fixture: &Fixture) -> usize {
+/// The objects the clone lacks, listed by a command that never downloads:
+/// those that HEAD's files and folders need, or with `history` those that
+/// every commit needs.
+fn missing(fixture: &Fixture, history: bool) -> usize {
+    let mut args = vec!["rev-list", "--objects", "--missing=print"];
+    if !history {
+        args.push("--no-walk");
+    }
+    args.push("HEAD");
     fixture
-        .git([
-            "rev-list",
-            "--objects",
-            "--missing=print",
-            "--no-walk",
-            "HEAD",
-        ])
+        .git(args)
         .expect("rev-list can run in the fixture")
         .lines()
         .filter(|line| line.starts_with('?'))
@@ -222,15 +222,29 @@ fn a_partial_clone_lacks_its_files_until_they_are_checked_out() {
 
     let bare_bones = source.partial_clone(false).unwrap();
     assert_eq!(bare_bones.head(), Some(f1::HEAD));
-    assert_eq!(missing_at_head(&bare_bones), f1::FILES.len());
+    assert_eq!(missing(&bare_bones, false), f1::FILES.len());
 
     let checked_out = source.partial_clone(true).unwrap();
-    assert_eq!(missing_at_head(&checked_out), 0);
+    assert_eq!(missing(&checked_out, false), 0);
+    // Checking out fetched the files at HEAD and nothing older. Three files
+    // of F1 were edited after they were added, so three earlier versions
+    // are still on the remote.
+    assert_eq!(missing(&checked_out, true), 3);
 
     for clone in [&bare_bones, &checked_out] {
         let promisor = clone.git(["config", "remote.origin.promisor"]).unwrap();
         assert_eq!(promisor, "true");
     }
+}
+
+#[test]
+fn a_complete_partial_clone_is_a_partial_clone_that_lacks_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.complete_partial_clone().unwrap();
+    assert_eq!(clone.head(), Some(f1::HEAD));
+    let promisor = clone.git(["config", "remote.origin.promisor"]).unwrap();
+    assert_eq!(promisor, "true");
+    assert_eq!(missing(&clone, true), 0);
 }
 
 #[test]
