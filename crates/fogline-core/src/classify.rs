@@ -1,0 +1,281 @@
+//! What kind of file something is, judged from its path, its size and its
+//! line count (spec section 5.2).
+//!
+//! Nothing here reads a file's content. These are labels from simple rules,
+//! not facts about the code, and the viewer presents them as labels.
+
+/// The labels a file can carry, stored as bits. The bit numbers are part of
+/// the bundle format (`flags` in `files.json`), so they must not change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Flags(u8);
+
+impl Flags {
+    /// git treats the file as binary, so it has no line count.
+    pub const BINARY: Flags = Flags(1 << 0);
+    /// A tool wrote the file: a lockfile, a minified file, or very long lines.
+    pub const GENERATED: Flags = Flags(1 << 1);
+    /// The file sits in a folder of third-party code.
+    pub const VENDORED: Flags = Flags(1 << 2);
+    /// The entry is a symbolic link, not a file with content of its own.
+    pub const SYMLINK: Flags = Flags(1 << 3);
+
+    pub fn contains(self, other: Flags) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn insert(&mut self, other: Flags) {
+        self.0 |= other.0;
+    }
+
+    /// The value written to the bundle.
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+/// Files that are languages by their whole name.
+const BY_NAME: &[(&str, &str)] = &[
+    ("CMakeLists.txt", "CMake"),
+    ("Dockerfile", "Dockerfile"),
+    ("Makefile", "Makefile"),
+    ("makefile", "Makefile"),
+];
+
+/// Languages by file extension, compared without regard to case. One
+/// extension has one language: `.h` is counted as C, though C++ uses it too.
+const BY_EXTENSION: &[(&str, &str)] = &[
+    ("bash", "Shell"),
+    ("bat", "Batch"),
+    ("c", "C"),
+    ("cc", "C++"),
+    ("cjs", "JavaScript"),
+    ("clj", "Clojure"),
+    ("cmd", "Batch"),
+    ("cpp", "C++"),
+    ("cs", "C#"),
+    ("css", "CSS"),
+    ("cts", "TypeScript"),
+    ("cxx", "C++"),
+    ("dart", "Dart"),
+    ("erl", "Erlang"),
+    ("ex", "Elixir"),
+    ("exs", "Elixir"),
+    ("fs", "F#"),
+    ("go", "Go"),
+    ("gql", "GraphQL"),
+    ("gradle", "Groovy"),
+    ("graphql", "GraphQL"),
+    ("groovy", "Groovy"),
+    ("h", "C"),
+    ("hh", "C++"),
+    ("hpp", "C++"),
+    ("hs", "Haskell"),
+    ("htm", "HTML"),
+    ("html", "HTML"),
+    ("ipynb", "Jupyter Notebook"),
+    ("java", "Java"),
+    ("jl", "Julia"),
+    ("js", "JavaScript"),
+    ("json", "JSON"),
+    ("jsx", "JavaScript"),
+    ("kt", "Kotlin"),
+    ("kts", "Kotlin"),
+    ("less", "Less"),
+    ("lua", "Lua"),
+    ("m", "Objective-C"),
+    ("markdown", "Markdown"),
+    ("md", "Markdown"),
+    ("mjs", "JavaScript"),
+    ("ml", "OCaml"),
+    ("mm", "Objective-C"),
+    ("mts", "TypeScript"),
+    ("nix", "Nix"),
+    ("php", "PHP"),
+    ("pl", "Perl"),
+    ("proto", "Protocol Buffers"),
+    ("ps1", "PowerShell"),
+    ("py", "Python"),
+    ("r", "R"),
+    ("rb", "Ruby"),
+    ("rs", "Rust"),
+    ("sass", "Sass"),
+    ("scala", "Scala"),
+    ("scss", "SCSS"),
+    ("sh", "Shell"),
+    ("sql", "SQL"),
+    ("svelte", "Svelte"),
+    ("swift", "Swift"),
+    ("tf", "Terraform"),
+    ("toml", "TOML"),
+    ("ts", "TypeScript"),
+    ("tsx", "TypeScript"),
+    ("vue", "Vue"),
+    ("xml", "XML"),
+    ("yaml", "YAML"),
+    ("yml", "YAML"),
+    ("zig", "Zig"),
+    ("zsh", "Shell"),
+];
+
+/// Files that package managers write and people do not edit.
+const LOCKFILES: &[&str] = &[
+    "Cargo.lock",
+    "Gemfile.lock",
+    "Package.resolved",
+    "Pipfile.lock",
+    "Podfile.lock",
+    "bun.lock",
+    "bun.lockb",
+    "composer.lock",
+    "deno.lock",
+    "flake.lock",
+    "go.sum",
+    "gradle.lockfile",
+    "mix.lock",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "packages.lock.json",
+    "pdm.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pubspec.lock",
+    "uv.lock",
+    "yarn.lock",
+];
+
+/// Folders that hold other people's code.
+const VENDOR_FOLDERS: &[&str] = &["vendor", "third_party", "node_modules"];
+
+/// A line longer than this, on average over the file, is not something a
+/// person wrote by hand.
+const LONG_LINE_BYTES: u64 = 500;
+
+/// The part of a path after its last `/`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// The language a file is written in, guessed from its name alone. `None`
+/// when the tables have no entry for it.
+pub fn language(path: &str) -> Option<&'static str> {
+    let name = file_name(path);
+    if let Some((_, language)) = BY_NAME.iter().find(|(known, _)| *known == name) {
+        return Some(language);
+    }
+    // `.gitignore` has no extension: the dot starts the name.
+    let (stem, extension) = name.rsplit_once('.')?;
+    if stem.is_empty() {
+        return None;
+    }
+    BY_EXTENSION
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(extension))
+        .map(|(_, language)| *language)
+}
+
+/// True for a lockfile, a minified file (`*.min.*`), or a text file whose
+/// lines average more than 500 bytes. `lines` is −1 for a binary file,
+/// which is never counted as generated by its line length.
+pub fn is_generated(path: &str, bytes: u64, lines: i64) -> bool {
+    let name = file_name(path);
+    if LOCKFILES.contains(&name) || name.contains(".min.") {
+        return true;
+    }
+    // Multiplying keeps the comparison exact, where dividing would round.
+    u64::try_from(lines).is_ok_and(|lines| lines > 0 && bytes > LONG_LINE_BYTES * lines)
+}
+
+/// True when one of the folders above the file is `vendor`, `third_party`
+/// or `node_modules`.
+pub fn is_vendored(path: &str) -> bool {
+    let mut parts = path.split('/');
+    // The last part is the file's own name, not a folder.
+    parts.next_back();
+    parts.any(|folder| VENDOR_FOLDERS.contains(&folder))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_combine_and_keep_their_bit_numbers() {
+        let mut flags = Flags::default();
+        assert_eq!(flags.bits(), 0);
+        flags.insert(Flags::GENERATED);
+        flags.insert(Flags::SYMLINK);
+        assert!(flags.contains(Flags::GENERATED));
+        assert!(!flags.contains(Flags::BINARY));
+        // The bundle format fixes these numbers.
+        assert_eq!(Flags::BINARY.bits(), 1);
+        assert_eq!(Flags::GENERATED.bits(), 2);
+        assert_eq!(Flags::VENDORED.bits(), 4);
+        assert_eq!(Flags::SYMLINK.bits(), 8);
+        assert_eq!(flags.bits(), 10);
+    }
+
+    #[test]
+    fn guesses_the_language_from_the_name() {
+        let cases = [
+            ("src/main.rs", Some("Rust")),
+            ("app/Models/User.PHP", Some("PHP")),
+            ("web/app.min.js", Some("JavaScript")),
+            ("include/util.h", Some("C")),
+            ("Dockerfile", Some("Dockerfile")),
+            ("build/Makefile", Some("Makefile")),
+            ("docs/caf\u{e9}.md", Some("Markdown")),
+            ("LICENSE", None),
+            ("notes.txt", None),
+            (".gitignore", None),
+            ("archive.tar.gz", None),
+            ("weird.", None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(language(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_extension_table_is_sorted_and_has_no_duplicates() {
+        // Sorted and lowercase, so an entry is easy to find and cannot be
+        // added twice without this test noticing.
+        for pair in BY_EXTENSION.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} and {}", pair[0].0, pair[1].0);
+        }
+        for (extension, _) in BY_EXTENSION {
+            assert_eq!(*extension, extension.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn lockfiles_and_minified_files_are_generated() {
+        assert!(is_generated("package-lock.json", 46, 4));
+        assert!(is_generated("crates/x/Cargo.lock", 10, 1));
+        assert!(is_generated("web/app.min.js", 45, 1));
+        assert!(is_generated("css/site.min.css", 45, 1));
+        assert!(!is_generated("src/minimum.js", 45, 1));
+        assert!(!is_generated("src/lock.rs", 45, 1));
+    }
+
+    #[test]
+    fn very_long_lines_are_generated() {
+        // 811 bytes on one line.
+        assert!(is_generated("web/bundle.js", 811, 1));
+        // An average of exactly 500 is still fine; 500.5 is not.
+        assert!(!is_generated("data.csv", 1000, 2));
+        assert!(is_generated("data.csv", 1001, 2));
+        // No lines to average over: empty and binary files.
+        assert!(!is_generated("src/empty.py", 0, 0));
+        assert!(!is_generated("assets/logo.bin", 100_000, -1));
+    }
+
+    #[test]
+    fn vendored_means_a_folder_not_a_file_name() {
+        assert!(is_vendored("vendor/lib/util.js"));
+        assert!(is_vendored("web/node_modules/x/index.js"));
+        assert!(is_vendored("third_party/zlib/zlib.h"));
+        assert!(!is_vendored("src/vendor.rs"));
+        assert!(!is_vendored("vendor"));
+        assert!(!is_vendored("src/vendored/x.rs"));
+    }
+}

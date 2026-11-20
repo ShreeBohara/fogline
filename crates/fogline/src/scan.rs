@@ -1,36 +1,95 @@
-//! `fogline scan`. So far it finds the repository and reports every way that
-//! can fail; counting files and history arrives with the rest of milestone
-//! M3 (spec section 6).
+//! `fogline scan`. So far it finds the repository and lists its files with
+//! their sizes and line counts. Reading history and writing the bundle
+//! arrive with the rest of milestone M3 (spec section 6).
 
+use std::io::{self, Write};
 use std::path::{self, Path};
 
+use fogline_core::files::{self, Files};
 use fogline_core::git::{self, Version};
-use fogline_core::repo::{self, Error};
+use fogline_core::repo::{self, Error, Repository};
 
 use crate::{EXIT_FAILURE, EXIT_GIT_UNUSABLE, EXIT_NOT_A_REPOSITORY, EXIT_USAGE, Failure};
 
 pub fn run(path: &Path) -> Result<(), Failure> {
     let found = repo::discover(path).map_err(explain)?;
+    let files = files::list(&found).map_err(|error| explain(Error::Git(error)))?;
 
-    let mut what = format!("found `{}` at {}", found.name, short(&found.head));
-    match &found.branch {
-        Some(branch) => what.push_str(&format!(" on branch {branch}")),
-        None => what.push_str(" (detached HEAD)"),
-    }
-    if found.shallow {
-        what.push_str(", a shallow clone");
-    }
-    Err(Failure::new(
-        EXIT_FAILURE,
-        format!(
-            "{what}, but `scan` is not implemented yet. Counting files and history \
-             arrives with the rest of milestone M3 (docs/specs/phase-1.md)."
-        ),
-    ))
+    // The summary is a message for a person, so it goes to stderr. stdout is
+    // kept for data that was asked for (spec section 5.1, rule 2). If stderr
+    // cannot be written to, there is nowhere left to say so.
+    let _ = io::stderr()
+        .lock()
+        .write_all(summary(&found, &files).as_bytes());
+    Ok(())
 }
 
-/// Turns a discovery error into its exit code and a message that says what
-/// to do next (spec section 5.1, rules 3 and 6).
+/// What a scan found, as the lines a person reads.
+fn summary(found: &Repository, files: &Files) -> String {
+    let branch = found.branch.as_deref().unwrap_or("detached");
+    let mut text = format!(
+        "fogline {} \u{b7} {} @ {} ({branch})\n",
+        env!("CARGO_PKG_VERSION"),
+        found.name,
+        short(&found.head),
+    );
+
+    let mut detail = vec![count(files.lines(), "line")];
+    if files.binary() > 0 {
+        detail.push(format!("{} binary", grouped(files.binary() as u64)));
+    }
+    if files.submodules_skipped > 0 {
+        detail.push(format!(
+            "{} skipped",
+            count(files.submodules_skipped, "submodule")
+        ));
+    }
+    text.push_str(&format!(
+        "  files     {} ({})\n",
+        grouped(files.entries.len() as u64),
+        detail.join(", ")
+    ));
+    text.push_str("  history   not read yet: that part of the scan is still to be built\n");
+
+    // Each of these limits what the numbers mean, so each is said out loud.
+    if found.shallow {
+        text.push_str("  note      this is a shallow clone, so only part of the history is here\n");
+    }
+    if files.lossy_paths {
+        text.push_str("  note      some paths are not valid UTF-8 and were converted\n");
+    }
+    if !files.attributes_from_commit {
+        text.push_str(&format!(
+            "  note      git {} reads .gitattributes from the work tree, not from the commit; \
+             git {} or newer reads the commit\n",
+            found.git,
+            Version::ATTRIBUTES_FROM_COMMIT,
+        ));
+    }
+    text
+}
+
+/// A number with a comma between each group of three digits: 1,122,175.
+fn grouped(number: u64) -> String {
+    let digits = number.to_string();
+    let mut text = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    text
+}
+
+/// A number with its noun: "1 line", "40 lines".
+fn count(number: u64, noun: &str) -> String {
+    let plural = if number == 1 { "" } else { "s" };
+    format!("{} {noun}{plural}", grouped(number))
+}
+
+/// Turns an error into its exit code and a message that says what to do
+/// next (spec section 5.1, rules 3 and 6).
 fn explain(error: Error) -> Failure {
     let minimum = Version::MINIMUM;
     match error {
@@ -94,4 +153,128 @@ fn shown(path: &Path) -> String {
 /// The first seven characters of a commit id, as git shows it.
 fn short(id: &str) -> &str {
     id.get(..7).unwrap_or(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use fogline_core::classify::Flags;
+    use fogline_core::files::FileEntry;
+    use fogline_core::repo::ObjectFormat;
+
+    use super::*;
+
+    fn repository() -> Repository {
+        Repository {
+            root: PathBuf::from("/work/demo"),
+            name: "demo".to_owned(),
+            bare: false,
+            shallow: false,
+            object_format: ObjectFormat::Sha1,
+            head: "822e3536cbae5f3404efab40519ba1de1102e6a0".to_owned(),
+            branch: Some("main".to_owned()),
+            git: Version::ATTRIBUTES_FROM_COMMIT,
+        }
+    }
+
+    fn file(path: &str, lines: i64, flags: Flags) -> FileEntry {
+        FileEntry {
+            path: path.to_owned(),
+            bytes: 10,
+            lines,
+            language: None,
+            flags,
+        }
+    }
+
+    fn files(entries: Vec<FileEntry>) -> Files {
+        Files {
+            entries,
+            submodules_skipped: 0,
+            lossy_paths: false,
+            attributes_from_commit: true,
+        }
+    }
+
+    #[test]
+    fn groups_digits_in_threes() {
+        let cases = [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (7_102, "7,102"),
+            (35_123, "35,123"),
+            (1_122_175, "1,122,175"),
+            (u64::MAX, "18,446,744,073,709,551,615"),
+        ];
+        for (number, expected) in cases {
+            assert_eq!(grouped(number), expected);
+        }
+    }
+
+    #[test]
+    fn counts_agree_with_their_nouns() {
+        assert_eq!(count(0, "line"), "0 lines");
+        assert_eq!(count(1, "line"), "1 line");
+        assert_eq!(count(1_200, "submodule"), "1,200 submodules");
+    }
+
+    #[test]
+    fn a_plain_summary_has_a_header_the_files_and_the_missing_part() {
+        let files = files(vec![
+            file("a.rs", 1_000, Flags::default()),
+            file("b.rs", 234, Flags::default()),
+        ]);
+        let expected = format!(
+            "fogline {} \u{b7} demo @ 822e353 (main)\n\
+             \x20 files     2 (1,234 lines)\n\
+             \x20 history   not read yet: that part of the scan is still to be built\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(summary(&repository(), &files), expected);
+    }
+
+    #[test]
+    fn a_summary_says_what_was_left_out_and_what_limits_it() {
+        let mut found = repository();
+        found.branch = None;
+        found.shallow = true;
+        found.git = Version {
+            major: 2,
+            minor: 39,
+            patch: 5,
+        };
+        let mut files = files(vec![
+            file("a.rs", 1, Flags::default()),
+            file("logo.png", -1, Flags::BINARY),
+        ]);
+        files.submodules_skipped = 1;
+        files.lossy_paths = true;
+        files.attributes_from_commit = false;
+
+        let text = summary(&found, &files);
+        assert!(text.contains("demo @ 822e353 (detached)\n"), "{text}");
+        assert!(
+            text.contains("  files     2 (1 line, 1 binary, 1 submodule skipped)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  note      this is a shallow clone"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  note      some paths are not valid UTF-8"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  note      git 2.39.5 reads .gitattributes from the work tree"),
+            "{text}"
+        );
+        assert!(
+            text.contains("git 2.41.0 or newer reads the commit\n"),
+            "{text}"
+        );
+    }
 }

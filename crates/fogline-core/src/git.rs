@@ -29,6 +29,15 @@ impl Version {
         patch: 0,
     };
 
+    /// The first git that can read `.gitattributes` from a commit instead of
+    /// from the work tree, through `GIT_ATTR_SOURCE`. git's own `git.c`
+    /// knows `--attr-source` at the v2.41.0 tag and not at v2.40.0.
+    pub const ATTRIBUTES_FROM_COMMIT: Version = Version {
+        major: 2,
+        minor: 41,
+        patch: 0,
+    };
+
     /// Reads the version out of what `git --version` prints.
     ///
     /// Vendors add their own suffixes, so only the leading numbers count:
@@ -78,7 +87,11 @@ pub enum Error {
 /// Variables that would make git read a repository other than the one it is
 /// run in. Git sets some of them itself while it runs hooks, so a fogline
 /// started from a hook would otherwise scan the wrong repository.
-const REDIRECTING_VARIABLES: [&str; 7] = [
+///
+/// `GIT_ATTR_SOURCE` is here for a related reason: it chooses where git
+/// reads `.gitattributes` from, and the engine sets it itself where that
+/// matters.
+const REDIRECTING_VARIABLES: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_COMMON_DIR",
@@ -86,6 +99,7 @@ const REDIRECTING_VARIABLES: [&str; 7] = [
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_NAMESPACE",
+    "GIT_ATTR_SOURCE",
 ];
 
 /// Starts a git invocation with the pinned environment and configuration.
@@ -119,8 +133,14 @@ pub fn command() -> Command {
 /// A git that exits with an error is still `Ok` here, because what a failure
 /// means depends on the question: callers look at the exit status.
 pub fn output_in(dir: &Path, args: &[&str]) -> Result<Output, Error> {
+    output_in_with(dir, &[], args)
+}
+
+/// Like [`output_in`], with extra environment variables for this one call.
+pub fn output_in_with(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> Result<Output, Error> {
     command()
         .current_dir(dir)
+        .envs(env.iter().copied())
         .args(args)
         .output()
         .map_err(|err| {
@@ -132,6 +152,24 @@ pub fn output_in(dir: &Path, args: &[&str]) -> Result<Output, Error> {
                 Error::Io(err)
             }
         })
+}
+
+/// Passes on the output of a git that succeeded, and turns one that failed
+/// into an error carrying what git said.
+pub fn succeeded(args: &[&str], output: Output) -> Result<Output, Error> {
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_owned();
+    Err(Error::Failed {
+        stderr: if stderr.is_empty() {
+            format!("`git {}` failed with {}", args.join(" "), output.status)
+        } else {
+            stderr
+        },
+    })
 }
 
 /// Finds out which git is installed.

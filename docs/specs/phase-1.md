@@ -148,7 +148,7 @@ Rules:
 Illustrative output of `fogline` on a large repository with no agent signatures:
 
 ```
-fogline 0.1.0 · django @ f24f38c
+fogline 0.1.0 · django @ f24f38c (main)
   files     7,102 (1,122,175 lines)                          0.3 s
   history   35,123 commits, 11 workers                       2.4 s
   agents    no agent signatures found; showing churn instead
@@ -165,7 +165,7 @@ fogline 0.1.0 · django @ f24f38c
 |---|---|
 | `bytes` | Blob size |
 | `lines` | Number of line terminators, plus one if the file is not empty and does not end with one. −1 for binary files. Binary means what git means: a NUL byte in the first 8,000 bytes, or marked binary in `.gitattributes`. |
-| `lang` | From an extension table of about 40 entries; otherwise unknown |
+| `lang` | From a table of file extensions and a few whole file names (`crates/fogline-core/src/classify.rs`); otherwise unknown. One extension has one language. |
 | `flags` | binary · generated (lockfiles by name, `*.min.*`, average line longer than 500 bytes) · vendored (`vendor/`, `third_party/`, `node_modules/` in the path) · symlink |
 
 **History.** All commits reachable from HEAD.
@@ -198,6 +198,7 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 | `history_before_rename_dropped` | History from before a file was renamed is missing. (Only if task 3.5 is not done.) |
 | `shallow_clone` | This clone holds only part of the history. |
 | `lossy_paths` | Some paths are not valid UTF-8 and were converted. |
+| `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. |
 | `history_off` | History was not read (`--history none`). |
 
 ### 5.3 How git is called
@@ -209,8 +210,8 @@ All repository access in Phase 1 goes through the `git` executable, version 2.25
 | Repository facts | `git rev-parse --is-bare-repository --is-inside-git-dir --is-shallow-repository --show-object-format`, run in `PATH` |
 | Repository root | `git rev-parse --show-toplevel`, or `git rev-parse --absolute-git-dir` for a bare repository or a path inside `.git`, where there is no work tree. Every later command runs at the root. |
 | HEAD | `git rev-parse --verify --quiet HEAD^{commit}` (exit 1 means no commits yet) and `git symbolic-ref --quiet --short HEAD` (exit 1 means HEAD is detached) |
-| Files and sizes | `git ls-tree -r -l -z HEAD` |
-| Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> HEAD` |
+| Files and sizes | `git ls-tree -r -l -z <head>` |
+| Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> <head>`, with `GIT_ATTR_SOURCE=<head>` |
 | Commit metadata | `git log --topo-order -z --format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%aE%x1f%B HEAD` |
 | Commit order | `git rev-list --topo-order HEAD`, cut into K contiguous slices |
 | Line statistics | K workers, each `git diff-tree --stdin -r --root -M50% -l1000 --diff-algorithm=minimal --numstat -z --no-textconv --no-ext-diff`, fed one slice on stdin |
@@ -220,7 +221,10 @@ Rules:
 - Every call sets `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, and passes `-c core.quotepath=false -c i18n.logOutputEncoding=UTF-8`. The flags above are explicit so the user's git configuration cannot change the numbers.
 - Every call removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_NAMESPACE`. Each would make git read a repository other than the one the scan was pointed at, and git sets some of them itself while it runs hooks.
 - "Not a git repository" is recognised by that phrase in git's error message, which `LC_ALL=C` keeps in English. Any other failure is reported with git's own message and exit code 1.
+- `<head>` is the commit id that discovery read, never the name `HEAD`. Every command of a scan then reads the same commit, even if someone commits while it runs.
 - `<empty-tree>` is the id printed by `git hash-object -t tree --stdin` on empty input. That command computes the id without writing an object.
+- `.gitattributes` can declare a file binary, which removes its line count. Left alone, git reads that file from the work tree: an uncommitted edit changes the numbers, and a bare repository ignores the file. Measured with git 2.52: a text file marked `binary` shows `-` in a work tree and 2 lines in a bare clone of the same commit. `GIT_ATTR_SOURCE=<head>` makes git read it from the commit instead. Git has had that variable since 2.41.0: its own `git.c` knows `--attr-source` at the v2.41.0 tag and not at v2.40.0. An older git ignores the variable, and the scan then records the caveat `attributes_from_work_tree`.
+- Known limit: a repository's own `info/attributes` file still applies, on every git. Git has no switch to ignore it.
 - No command that writes is ever used: no `status`, no `mktree`, nothing that refreshes the index.
 
 Output shapes, verified today by reading the raw bytes:
@@ -446,7 +450,7 @@ The riskiest part goes first, while the binary is still trivial.
 | # | Task | Check |
 |---|---|---|
 | 3.1 ✓ | Repository discovery, HEAD facts, exit codes 3 and 4 | Contract tests: not a repository, no commits, git missing, git too old (simulated by a script named `git`, so on Unix only) |
-| 3.2 | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
+| 3.2 ✓ | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
 | 3.3 | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
 | 3.4 | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every signature has a fixture commit; v1 at `f857867` gives 17 of 51 |
 | 3.5 | Carry history across renames to the current path (SHOULD); caveat registry | Rename case in fixture F3 |
@@ -511,7 +515,7 @@ Fixture repositories are built at test time by `fogline-testkit` with fixed date
 |---|---|
 | F1 basic | Six files in three directories, five commits, two authors, no agents |
 | F2 agents | One commit per signature in §5.4; mixed-case keys; several trailers on one commit; a trailer inside a squash-style body; a message that mentions a tool without a trailer line (must not match); a `[bot]` author |
-| F3 edges | Empty file, binary file, file with no final newline, CRLF file, non-ASCII path, path with spaces, deep nesting, symlink, submodule entry, deleted file, renamed file, renamed-and-edited file, lockfile, minified file, merge commit, empty commit |
+| F3 edges | Empty file, binary file, file with no final newline, CRLF file, non-ASCII path, path with spaces, deep nesting, symlink, submodule entry, deleted file, renamed file, renamed-and-edited file, lockfile, minified file, a file that is one very long line, vendored file, merge commit, empty commit |
 | F4 empty | A repository with no commits |
 | F5 shallow | A depth-1 clone of F1 |
 

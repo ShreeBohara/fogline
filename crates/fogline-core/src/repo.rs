@@ -52,6 +52,8 @@ pub struct Repository {
     pub head: String,
     /// The branch HEAD is on, or `None` when HEAD is detached.
     pub branch: Option<String>,
+    /// The git that answered. Later steps check it for what it can do.
+    pub git: Version,
 }
 
 /// Why there is no repository to scan.
@@ -113,7 +115,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     } else {
         ["rev-parse", "--show-toplevel"]
     };
-    let root = path_from_git(succeeded(&top, git::output_in(path, &top)?)?.stdout)?;
+    let root = path_from_git(git::succeeded(&top, git::output_in(path, &top)?)?.stdout)?;
 
     const HEAD: [&str; 4] = ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"];
     let output = git::output_in(&root, &HEAD)?;
@@ -121,7 +123,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     if output.status.code() == Some(1) {
         return Err(Error::NoCommits(root));
     }
-    let output = succeeded(&HEAD, output)?;
+    let output = git::succeeded(&HEAD, output)?;
     let head = lossy(&output.stdout);
     if !is_object_id(&head, facts.object_format) {
         return Err(unexpected(&HEAD, &output).into());
@@ -133,7 +135,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     let branch = if output.status.code() == Some(1) {
         None
     } else {
-        Some(lossy(&succeeded(&BRANCH, output)?.stdout))
+        Some(lossy(&git::succeeded(&BRANCH, output)?.stdout))
     };
 
     Ok(Repository {
@@ -144,6 +146,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
         object_format: facts.object_format,
         head,
         branch,
+        git: version,
     })
 }
 
@@ -206,22 +209,6 @@ fn is_object_id(text: &str, format: ObjectFormat) -> bool {
         && text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-/// Passes on a successful run, and turns a failed one into an error.
-fn succeeded(args: &[&str], output: Output) -> Result<Output, git::Error> {
-    if output.status.success() {
-        Ok(output)
-    } else {
-        let stderr = lossy(&output.stderr);
-        Err(git::Error::Failed {
-            stderr: if stderr.is_empty() {
-                format!("`git {}` failed with {}", args.join(" "), output.status)
-            } else {
-                stderr
-            },
-        })
-    }
 }
 
 fn unexpected(args: &[&str], output: &Output) -> git::Error {
