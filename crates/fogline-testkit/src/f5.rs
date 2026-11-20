@@ -11,6 +11,10 @@ pub const HEAD: &str = f1::HEAD;
 /// The number of commits the clone holds.
 pub const COMMITS: usize = 1;
 
+/// What the one commit looks like from inside the clone: nothing comes
+/// before it, so it seems to add every line of every file.
+pub const ADDED: u64 = f1::LINES;
+
 /// Builds F1, clones it at depth 1 into a fresh temporary directory, and
 /// keeps only the clone.
 pub fn build() -> io::Result<Fixture> {
