@@ -11,7 +11,7 @@ Coding agents now write code faster than people can read it. Fogline is meant to
 | Piece | State |
 |---|---|
 | `fogline version` | Works. Prints the version, or build and environment details with `--json`. |
-| `fogline scan` | Recognised but not implemented. It exits with an error that says so. |
+| `fogline scan` | Finds the repository from any folder inside it, bare and shallow repositories included, and reports what is wrong with its own exit code: 3 for no repository or no commits, 4 for git missing or older than 2.25. Counting files and history is not implemented yet, and the scan says so. |
 | Viewer | A shell that looks for a bundle and reports what it found. There is no map yet. |
 | npm launcher | Finds the binary for the machine and runs it. It is tested, and nothing is published to npm yet. |
 | Test kit | Builds small git repositories that have the same commit ids on every machine. |

@@ -23,7 +23,7 @@ pub struct Cli {
 pub enum Command {
     /// Scan a repository and print a summary (not implemented yet)
     Scan {
-        /// Repository to scan
+        /// The repository to scan, or any folder inside it
         #[arg(default_value = ".")]
         path: PathBuf,
     },

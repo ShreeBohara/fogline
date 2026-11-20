@@ -138,9 +138,9 @@ global options:
 
 Rules:
 
-1. `PATH` defaults to the current directory. Any directory inside a work tree resolves to the repository root. Bare repositories work.
+1. `PATH` defaults to the current directory. Any directory inside a work tree resolves to the repository root. Bare repositories work, and so does a path inside a `.git` folder.
 2. Progress and messages go to stderr. stdout carries only data that was asked for (`--json`, `version`).
-3. Exit codes: `0` success · `1` unexpected failure · `2` usage error · `3` not a git repository, or no commits yet · `4` git not found, or older than 2.25.
+3. Exit codes: `0` success · `1` unexpected failure · `2` usage error, including a `PATH` that does not exist or is not a folder · `3` not a git repository, or no commits yet · `4` git not found, or older than 2.25.
 4. The scan never writes inside the repository, writes nowhere at all unless `--out` is given, and makes no network requests. Tests enforce all three (§7).
 5. `open` prints the URL, opens the default browser unless `--no-browser` or the `CI` variable is set, and serves until Ctrl-C.
 6. An error says what happened and what to do next. Example: `fogline: /tmp/x is not inside a git repository. Run it from a project folder, or pass a path.`
@@ -202,11 +202,13 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 
 ### 5.3 How git is called
 
-All repository access in Phase 1 goes through the `git` executable, version 2.25 or newer.
+All repository access in Phase 1 goes through the `git` executable, version 2.25 or newer. 2.25.0 is the first release with `rev-parse --show-object-format`: git's own `builtin/rev-parse.c` has it at the v2.25.0 tag and not at v2.24.0.
 
 | Purpose | Command |
 |---|---|
-| Repository facts | `git rev-parse --git-dir --is-bare-repository --is-shallow-repository --show-object-format HEAD` and `git symbolic-ref -q --short HEAD` |
+| Repository facts | `git rev-parse --is-bare-repository --is-inside-git-dir --is-shallow-repository --show-object-format`, run in `PATH` |
+| Repository root | `git rev-parse --show-toplevel`, or `git rev-parse --absolute-git-dir` for a bare repository or a path inside `.git`, where there is no work tree. Every later command runs at the root. |
+| HEAD | `git rev-parse --verify --quiet HEAD^{commit}` (exit 1 means no commits yet) and `git symbolic-ref --quiet --short HEAD` (exit 1 means HEAD is detached) |
 | Files and sizes | `git ls-tree -r -l -z HEAD` |
 | Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> HEAD` |
 | Commit metadata | `git log --topo-order -z --format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%aE%x1f%B HEAD` |
@@ -216,6 +218,8 @@ All repository access in Phase 1 goes through the `git` executable, version 2.25
 Rules:
 
 - Every call sets `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, and passes `-c core.quotepath=false -c i18n.logOutputEncoding=UTF-8`. The flags above are explicit so the user's git configuration cannot change the numbers.
+- Every call removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_NAMESPACE`. Each would make git read a repository other than the one the scan was pointed at, and git sets some of them itself while it runs hooks.
+- "Not a git repository" is recognised by that phrase in git's error message, which `LC_ALL=C` keeps in English. Any other failure is reported with git's own message and exit code 1.
 - `<empty-tree>` is the id printed by `git hash-object -t tree --stdin` on empty input. That command computes the id without writing an object.
 - No command that writes is ever used: no `status`, no `mktree`, nothing that refreshes the index.
 
@@ -441,7 +445,7 @@ The riskiest part goes first, while the binary is still trivial.
 
 | # | Task | Check |
 |---|---|---|
-| 3.1 | Repository discovery, HEAD facts, exit codes 3 and 4 | Contract tests: not a repository, no commits, git too old (simulated) |
+| 3.1 ✓ | Repository discovery, HEAD facts, exit codes 3 and 4 | Contract tests: not a repository, no commits, git missing, git too old (simulated by a script named `git`, so on Unix only) |
 | 3.2 | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
 | 3.3 | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
 | 3.4 | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every signature has a fixture commit; v1 at `f857867` gives 17 of 51 |

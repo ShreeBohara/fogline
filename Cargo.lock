@@ -135,12 +135,15 @@ dependencies = [
  "fogline-testkit",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
 name = "fogline-core"
 version = "0.0.1"
 dependencies = [
+ "fogline-testkit",
+ "tempfile",
  "thiserror",
 ]
 
