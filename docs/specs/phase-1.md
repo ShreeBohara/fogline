@@ -1,6 +1,6 @@
 # Phase 1 spec — reset and tracer bullet
 
-Status: in progress; milestone M1 (the skeleton) is built, and M2 (distribution) is built as far as the name lock, task 2.5 · Written 2026-11-15 · Implements the [plan](../plan.md) §8, Phase 1 · Working name: **Fogline**
+Status: in progress; milestone M1 (the skeleton) is built, M2 (distribution) is built as far as the name lock, task 2.5, and M3 (the scan) as far as task 3.4 · Written 2026-11-15 · Implements the [plan](../plan.md) §8, Phase 1 · Working name: **Fogline**
 
 How to read this:
 
@@ -92,7 +92,7 @@ Repository layout. Only what Phase 1 uses; `apps/site`, `plugins/`, `action/` an
 Cargo.toml  rust-toolchain.toml  deny.toml  package.json  pnpm-workspace.yaml  biome.json  .nvmrc
 crates/
   fogline-core/        scan, attribution, bundle types and writer; never prints, never exits
-    data/signatures.toml
+    src/signatures.rs  the table of agent signatures, as Rust data (§5.4)
   fogline/             the binary: CLI, local server, browser launch, export
     assets/            built viewer (ignored by git) and a committed stub page
     tests/contract.rs  black-box tests that run the binary named by FOGLINE_BIN
@@ -112,7 +112,7 @@ README.md  LICENSE (MIT)  CONTRIBUTING.md  SECURITY.md  CHANGELOG.md  CLAUDE.md
 
 Toolchain: Rust 1.100.0 (edition 2024), Node 26 LTS, pnpm 12, TypeScript 7, Vite 8, React 19.3, Vitest 5, Playwright 1.65, Biome 2.6.
 
-Rust crates: clap 4.6, axum 0.8 on tokio, rust-embed 8, serde with schemars, regex, toml, thiserror and anyhow, indicatif, open. Tests use insta, assert_cmd, proptest and tempfile. Nothing else without a line in the pull request saying why.
+Rust crates: clap 4.6, axum 0.8 on tokio, rust-embed 8, serde with schemars, thiserror and anyhow, indicatif, open. Tests use insta, assert_cmd and tempfile. Nothing else without a line in the pull request saying why. Three crates of the first draft were not needed: proptest (§7), and regex and toml (§5.4).
 
 Building without Node works: the binary then embeds the stub page, which says the viewer was not built.
 
@@ -155,6 +155,17 @@ fogline 0.1.0 · django @ f24f38c (main)
   map       http://127.0.0.1:53412/9f3c…/      Ctrl-C to stop
 ```
 
+What `fogline scan` prints today for a repository with agent signatures, CodebaseQA v1 at `f857867`:
+
+```
+fogline 0.0.1 · codebaseqa @ f857867 (detached)
+  files     244 (53,352 lines, 14 binary)
+  history   51 commits, 60,193 lines added, 6,841 deleted
+  agents    at least 17 agent-attributed commits out of 51 (Claude Code 17), with an estimated 14% of added lines
+```
+
+The `agents` line names each tool with the commits that carry its mark. Its wording follows §5.2: the commit count reads "at least" and the share of lines reads "estimated". With no agent-attributed commit it reads `no agent signatures found`; "showing churn instead" is added by `open`, which has a map to show. A line `bots      30 commits by bots` follows when bots made commits. With `--history none` there is no `agents` line, because attribution comes from the history.
+
 The summary does not depend on `--jobs`: a contract test compares it for 1, 4, 11 and 64. `--timings` adds how long each line took and how many git processes read the history.
 
 ### 5.2 What the scan computes
@@ -184,6 +195,8 @@ The summary does not depend on `--jobs`: a contract test compares it for 1, 4, 1
 - **agent-attributed** — an agent signature matches (§5.4);
 - **automation** — a bot wrote it and no agent signature matches;
 - **unsigned** — everything else. Unsigned does not mean hand-written.
+
+A merge commit is attributed like any other commit; it adds no lines. A commit that carries the marks of two agents is one agent-attributed commit, and both are recorded. The totals for each signature count such a commit under both, so they can add up to more than the number of agent-attributed commits. All the lines a commit adds go to the commit's class, whoever wrote them.
 
 A file's *agent-attributed share* is the added lines from agent-attributed commits divided by all added lines.
 
@@ -266,46 +279,76 @@ The K processes are started one after another. Starting a process needs several 
 
 ### 5.4 Agent signatures
 
-The table lives in `crates/fogline-core/data/signatures.toml`, is embedded at build time, and carries its own version (`2026.11.1`), which the manifest records.
+The table lives in `crates/fogline-core/src/signatures.rs`, is part of the binary, and carries its own version (`2026.11.1`), which the manifest records.
 
-```toml
-[[signature]]
-id = "claude-code"
-kind = "agent"                 # agent | automation
-tool = "Claude Code"
-trailer = { key = "co-authored-by", email = '^noreply@anthropic\.com$' }
-evidence = "GitHub commit search, 2026-11-15: about 50.6M commits"
-fixture = "claude-trailer"
-```
+It is Rust data, not a file that is parsed at run time, and its rules use no pattern language. A mistake in it is then a compile error or a failing test and never a scan that goes wrong. The engine needs neither a TOML parser nor a regular-expression engine. And every rule the table needs is one of four plain comparisons. The first draft of this spec put the table in `data/signatures.toml` with regular expressions; that file format comes back, with a parser, if users ever bring their own signatures.
 
-Rule types: `trailer` (key, optional name pattern, optional email pattern), `author` (name or email pattern), `message` (pattern on any line).
+A signature is one tool and the marks it leaves. Any one mark is enough.
+
+| Mark | Matches |
+|---|---|
+| trailer | A trailer with this key whose value is `Name <email>`, with a condition on the name and one on the email |
+| trailer key | A trailer with this key, whatever its value |
+| author | The commit's author, with a condition on the name and one on the email |
+| line | A line of the message that holds this text |
+
+A condition is "any", "is", "starts with" or "ends with".
 
 Matching:
 
-- Trailer keys are case-insensitive. A trailer is any line of the form `Key: value`, anywhere in the message. Squash merges copy the trailers of the commits they squash into the message body; a real commit found today has dozens of `Co-authored-by: Cursor` lines that way.
-- An agent match beats an automation match. Every matching id is recorded, and the commit counts once.
-- No signature ships without a real commit behind it: repository, SHA and the matching line are stored under `tests/fixtures/signatures/`.
+- A trailer is any line of the form `Key: value`, anywhere in the message, where the key is made of letters, digits and hyphens. Spaces around the line are ignored. Squash merges copy the trailers of the commits they squash into the middle of their message, often indented: a real commit, `mattermost/mattermost` at `d99a529b`, has dozens of `Co-authored-by: Cursor` lines that way.
+- Letters are compared without regard to case, in keys, names, addresses and texts. Tools do not agree on `Co-Authored-By`.
+- An agent match beats an automation match, so an agent's bot account is an agent. Every agent whose mark is found is recorded, in the order of the table, and the commit counts once.
+- No mark ships without a real commit behind it. For every mark the table stores a public repository, a commit id and the line as it stands in that commit. A unit test checks each rule against its own line, and `cargo test -p fogline-core --test signatures -- --ignored` reads every one of those commits from GitHub again.
+- Every mark names the commit of fixture F2 that carries it, and a test holds the two together.
 
-Seed table. Counts are GitHub commit-search totals on 2026-11-15: approximate, public default branches only.
+The table, version 2026.11.1:
 
-| id | Rule | Seen |
-|---|---|---|
-| `claude-code` | trailer email `noreply@anthropic.com` (the name carries the model, e.g. `Claude Fable 5.2`) | ≈ 50.6M |
-| `claude-code-marker` | message contains `Generated with Claude Code` | ≈ 6.7M |
-| `claude-app` | author `claude[bot]` | in a real repository |
-| `cursor` | trailer email `cursoragent@cursor.com`; author `cursor[bot]` | ≈ 6.6M; ≈ 206k |
-| `copilot` | trailer name `Copilot…` with email ending `+Copilot@users.noreply.github.com`; author `copilot-swe-agent[bot]` | ≈ 2.6M; ≈ 3.7M |
-| `codex` | trailer `Codex <codex@openai.com>` | ≈ 649k |
-| `jules` | author `google-labs-jules[bot]` | ≈ 1.29M |
-| `gemini` | trailer name starting `Gemini` with email `noreply@google.com` | ≈ 359k |
-| `amp` | trailer key `Amp-Thread-ID` | ≈ 186k |
-| `factory` | trailer name `factory-droid[bot]` | ≈ 163k |
-| `warp` | trailer `Warp <agent@warp.dev>` | ≈ 55k |
-| `kiro` | trailer email `noreply@kiro.dev` | ≈ 16.6k |
-| `devin` | author `devin-ai-integration[bot]` | in a real repository |
-| `bot` (automation) | author name ends with `[bot]` and no agent rule matched, e.g. `dependabot[bot]`, `github-actions[bot]` | in real repositories |
+| id | Tool | Marks | Seen in |
+|---|---|---|---|
+| `claude-code` | Claude Code | trailer `Co-authored-by` with the email `noreply@anthropic.com` (the name is the model, such as `Claude Fable 5.2`); a line holding `Generated with [Claude Code]` | `Arize-ai/openinference`, `usenotra/notra-mcp` |
+| `claude-app` | Claude (GitHub app) | author `claude[bot]` | `Arize-ai/openinference` |
+| `cursor` | Cursor | trailer email `cursoragent@cursor.com`; author `cursor[bot]` | `mattermost/mattermost`, `getsentry/sentry` |
+| `copilot` | GitHub Copilot | trailer email, or author email, ending `+Copilot@users.noreply.github.com` | `open-telemetry/semantic-conventions-genai`, `Open-Coding-Society/pages` |
+| `codex` | Codex | trailer email `codex@openai.com` | `tmt-ninja/tmt` |
+| `jules` | Jules | author `google-labs-jules[bot]` | `googleapis/python-bigquery` |
+| `gemini` | Gemini | trailer name starting `Gemini`, with the email `noreply@google.com` | `tmt-ninja/tmt` |
+| `amp` | Amp | trailer key `Amp-Thread-ID` | `sourcegraph/amp-examples-and-guides` |
+| `factory` | Factory Droid | trailer name `factory-droid[bot]` | `Factory-AI/factory` |
+| `warp` | Warp | trailer email `agent@warp.dev` or `oz-agent@warp.dev` | `warpdotdev/warp`, `warpdotdev/docs` |
+| `kiro` | Kiro | trailer email `noreply@kiro.dev` | `bleachbr/bleach-idle` |
+| `junie` | Junie | trailer email `junie@jetbrains.com` | `JetBrains/intellij-platform-gradle-plugin` |
+| `devin` | Devin | author `devin-ai-integration[bot]` | `airbytehq/airbyte-python-cdk` |
+| `aider` | Aider | trailer email `aider@aider.chat`; author name ending `(aider)` | `Aider-AI/aider`, `uwislab/urobot-mcp` |
+| `opencode` | opencode | trailer name starting `opencode`; trailer email `noreply@opencode.ai`; author `opencode-agent[bot]` | `eclipse-oniro-mirrors/arkcompiler_ets_frontend`, `EbookFoundation/free-programming-books`, `sst/opencode` |
+| `cline` | Cline | trailer email `noreply@cline.bot` | `cline/cline` |
+| `goose` | Goose | trailer `Goose <opensource@block.xyz>`; trailer email `goose@aaif.dev` | `block/ghost`, `aaif-goose/goose` |
+| `bot` (automation) | a bot | author name ending `[bot]`, when no agent matched: `dependabot[bot]`, `github-actions[bot]` | `actions/setup-node` |
 
-To verify in task 3.4 before adding: aider, opencode, Windsurf, Cline, Junie, Goose. GitHub's search rate limit cut the first pass short.
+Every trailer mark but Amp's has the key `Co-authored-by`.
+
+How common the marks are. GitHub's commit search, over the default branches of public repositories, gave these sizes on 2026-11-19. They are rough and not counts: GitHub stops counting early on a large query and says when it has, and the same query gave different totals on different days. Where it counted to the end, the number is given.
+
+| Size | Marks |
+|---|---|
+| Tens of millions of commits | `claude-code`'s trailer; `bot` |
+| Millions | `claude-code`'s line; `cursor`'s trailer; both marks of `copilot`; `jules` |
+| Hundreds of thousands | `claude-app`; `cursor[bot]`; `codex`; `amp`; `factory`; `devin`; both marks of `aider`; `opencode` |
+| Tens of thousands | `gemini`; `warp`; `junie` (29,159) |
+| Thousands or fewer | `kiro` (3,645); `goose` (1,549 with Block's address); `cline` (hundreds with its address) |
+
+What changed against the seed table of the first draft, and why:
+
+- `claude-code-marker` is now a second mark of `claude-code`: one tool, one id. Its text needs the square brackets. In real commits the tool's name is a link, `Generated with [Claude Code](…)`, so the draft's text `Generated with Claude Code` would never have matched.
+- `copilot`, `codex` and `warp` are recognised by their address alone. The name in front of Copilot's varies: `Copilot`, `Copilot App`, `copilot-swe-agent[bot]`. Warp's agent Oz has an address of its own.
+- New, each found in real commits first: `aider`, `opencode`, `cline`, `junie`, `goose`. They were the draft's "to verify" list.
+- Not added: Windsurf, the sixth on that list. 982 commits name it. Nearly all the hits looked at are a review bot, `windsurf-bot[bot]`, and one says `Windsurf Cascade <cascade@windsurf.ai>`. That is too little to build a rule on.
+
+Known limits:
+
+- An agent's bot account that is not in the table counts as automation. `factory-droid[bot]` as an author is one.
+- Only a second author is a mark. `Reviewed-by` or `Signed-off-by` with an agent's address is not.
+- A line mark matches wherever its text stands in a line, so a commit that quotes Claude Code's line in its message counts.
 
 ### 5.5 Bundle v0
 
@@ -476,7 +519,7 @@ The riskiest part goes first, while the binary is still trivial.
 | 3.1 ✓ | Repository discovery, HEAD facts, exit codes 3 and 4 | Contract tests: not a repository, no commits, git missing, git too old (simulated by a script named `git`, so on Unix only) |
 | 3.2 ✓ | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
 | 3.3 ✓ | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
-| 3.4 | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every signature has a fixture commit; v1 at `f857867` gives 17 of 51 |
+| 3.4 ✓ | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every mark has a fixture commit; v1 at `f857867` gives 17 of 51 |
 | 3.5 | Carry history across renames to the current path (SHOULD); caveat registry | Rename case in fixture F3 |
 | 3.6 | Bundle writer, schema export, TypeScript types, drift check, `scan --out`, `--json`, `--timings` | Two scans give identical bytes in every file but `run.json` |
 | 3.7 | `cargo xtask bench scan` over `bench/corpus.toml` | Django scans in 5 s or less (target) |
@@ -538,7 +581,7 @@ Fixture repositories are built at test time by `fogline-testkit` with fixed date
 | Fixture | Contains |
 |---|---|
 | F1 basic | Six files in three directories, five commits, two authors, no agents |
-| F2 agents | One commit per signature in §5.4; mixed-case keys; several trailers on one commit; a trailer inside a squash-style body; a message that mentions a tool without a trailer line (must not match); a `[bot]` author |
+| F2 agents | One commit for each mark in §5.4, named by the first line of its message, and the engine's table names the commit that carries each mark. Then the cases that are easy to get wrong: capitals in a key and an address; two agents on one commit; two marks of one tool; trailers indented inside a squash-style body; a message that talks about a tool, with the trailer's words in the middle of a sentence (must not match); an agent's address under `Reviewed-by` (must not match); an address that only ends like an agent's (must not match); a `[bot]` author; a bot's commit with an agent's trailer; a merge commit with a trailer. Commit number k adds a file of k lines, so a sum over the wrong commits comes out wrong. |
 | F3 edges | Empty file, binary file, file with no final newline, CRLF file, non-ASCII path, path with spaces, deep nesting, symlink, submodule entry, deleted file, renamed file, renamed-and-edited file, lockfile, minified file, a file that is one very long line, vendored file, merge commit, empty commit |
 | F4 empty | A repository with no commits |
 | F5 shallow | A depth-1 clone of F1 |
@@ -547,14 +590,16 @@ Fixture repositories are built at test time by `fogline-testkit` with fixed date
 
 The differential checks also run on any repository, for the ones too large to build in a test: `FOGLINE_HISTORY_REPO=<path> cargo test --release -p fogline-core --test history -- --ignored --nocapture`.
 
-Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today from commit messages with a subset of the seed rules, so read them as minimums:
+Benchmark corpus, to be pinned by SHA in `bench/corpus.toml` (task 3.7). Measured on 2026-11-19 with `fogline scan` and table 2026.11.1. The commit counts are lower bounds, as always:
 
-| Repository | Role | Commits | With an agent signature |
-|---|---|---|---|
-| `codebaseqa` at `f857867` | Tiny, known answer | 51 | 17 (33%) |
-| `colbymchenry/codegraph` | Agent-heavy | 1,853 | 1,423 (77%) |
-| `Graphify-Labs/graphify` | Agent-heavy | 3,065 | 1,478 (48%) |
-| `django/django` at `f24f38c6b2` | Large, none | 35,123 | 0 |
+| Repository | Role | Commits | At least this many agent-attributed | Tools |
+|---|---|---|---|---|
+| `codebaseqa` at `f857867` | Tiny, known answer | 51 | 17 (33%) | Claude Code 17 |
+| `colbymchenry/codegraph` at `69bbb38978` | Agent-heavy | 1,949 | 1,517 (78%) | Claude Code 1,517, GitHub Copilot 1; 31 more commits by bots |
+| `Graphify-Labs/graphify` at `f51d46c63d` | Agent-heavy | 3,128 | 1,529 (49%) | Claude Code 1,508, Cursor 10, Codex 7, GitHub Copilot 1, Gemini 1, Warp 1, opencode 1 |
+| `django/django` at `f24f38c6b2` | Large, none | 35,123 | 0 | |
+
+The same command as for the differential checks prints these numbers for a clone at that commit: it lists the agent-attributed commits, the commits by bots, and the commits and added lines of each signature. For the three repositories with agents, a second count made by hand, with `git log` and a regular expression for Claude Code's two marks, gave the same 17, 1,517 and 1,508.
 
 ---
 
@@ -699,14 +744,14 @@ Measured today on Django at `f24f38c6b2`: 7,102 files, 1,122,175 text lines, 1,3
 | `git blame` on 200 Python files, one at a time | 33.4 s (167 ms per file) |
 | `git blame` on the same files, 10 at a time | 5.2 s |
 
-Measured again on 2026-11-19 with `fogline scan` itself: release build, git 2.52, 11 cores, median of five runs (three for `--jobs 4`, one for `--jobs 1`).
+Measured again on 2026-11-19 with `fogline scan` itself, after task 3.4, so with attribution: release build, git 2.52, 11 cores, median of five runs (three for `--jobs 4`, one for `--jobs 1`). The machine was not idle. A first measurement the same day, after task 3.3 and on a busier machine, gave 2.7 s, 4.4 s, 14.3 s and 0.30 s.
 
 | Command | Time |
 |---|---|
-| `fogline scan`, which here means 11 jobs | 2.7 s |
-| `fogline scan --jobs 4` | 4.4 s |
-| `fogline scan --jobs 1` | 14.3 s |
-| `fogline scan --history none` | 0.30 s |
+| `fogline scan`, which here means 11 jobs | 2.5 s |
+| `fogline scan --jobs 4` | 4.2 s |
+| `fogline scan --jobs 1` | 12.5 s |
+| `fogline scan --history none` | 0.26 s |
 
 It reports 35,123 commits, 591 merges, 3,378,909 lines added and 2,253,367 deleted, in 154,174 changes to 11,797 paths, 2,398 of them renames. The history is the same for 1, 4 and 11 jobs, and it is what one `git log --numstat` process reports, commit for commit. The command at the end of §7 repeats that check and prints these counts.
 

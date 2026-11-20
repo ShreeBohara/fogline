@@ -1,17 +1,19 @@
 //! `fogline scan`. So far it finds the repository, lists its files with
-//! their sizes and line counts, and reads its history. Attribution and the
-//! bundle arrive with the rest of milestone M3 (spec section 6).
+//! their sizes and line counts, reads its history, and says how many
+//! commits are agent-attributed. The bundle arrives with the rest of
+//! milestone M3 (spec section 6).
 
 use std::io::{self, Write};
 use std::num::NonZero;
 use std::path::{self, Path};
 use std::thread;
 
-use fogline_core::aggregate;
+use fogline_core::aggregate::{self, SignatureTotals, Totals};
 use fogline_core::files::{self, Files};
 use fogline_core::git::{self, Version};
 use fogline_core::history::{self, History};
 use fogline_core::repo::{self, Error, Repository};
+use fogline_core::signatures::{self, Kind};
 
 use crate::cli::HistoryChoice;
 use crate::{EXIT_FAILURE, EXIT_GIT_UNUSABLE, EXIT_NOT_A_REPOSITORY, EXIT_USAGE, Failure};
@@ -86,6 +88,7 @@ fn summary(found: &Repository, files: &Files, history: Option<&History>) -> Stri
                 count(totals.added, "line"),
                 grouped(totals.deleted)
             ));
+            text.push_str(&agents(&totals, &aggregate::by_signature(history)));
         }
         None => text.push_str("  history   not read (--history none)\n"),
     }
@@ -114,6 +117,68 @@ fn summary(found: &Repository, files: &Files, history: Option<&History>) -> Stri
         ));
     }
     text
+}
+
+/// The lines about agents and bots (spec section 5.2).
+///
+/// The wording is deliberate. A commit count is a lower bound, because an
+/// agent that leaves no mark cannot be seen, so it reads "at least". A
+/// share of lines is an estimate, because all the lines of a marked commit
+/// count, whoever wrote them, so it reads "an estimated".
+fn agents(totals: &Totals, by_signature: &[SignatureTotals]) -> String {
+    let mut text = String::new();
+    if totals.commits_agent == 0 {
+        text.push_str("  agents    no agent signatures found\n");
+    } else {
+        // The tools with the most commits first. The sort keeps the order
+        // of the table among tools with the same number.
+        let mut tools: Vec<(&str, u64)> = by_signature
+            .iter()
+            .filter_map(|sum| {
+                let signature = signatures::by_id(sum.id)?;
+                (signature.kind == Kind::Agent).then_some((signature.tool, sum.commits))
+            })
+            .collect();
+        tools.sort_by_key(|&(_, commits)| std::cmp::Reverse(commits));
+        let tools: Vec<String> = tools
+            .iter()
+            .map(|(tool, commits)| format!("{tool} {}", grouped(*commits)))
+            .collect();
+        text.push_str(&format!(
+            "  agents    at least {} out of {} ({})",
+            count(totals.commits_agent, "agent-attributed commit"),
+            grouped(totals.commits),
+            tools.join(", "),
+        ));
+        if totals.added > 0 {
+            text.push_str(&format!(
+                ", with an estimated {} of added lines",
+                share(totals.added_agent, totals.added)
+            ));
+        }
+        text.push('\n');
+    }
+    if totals.commits_automation > 0 {
+        text.push_str(&format!(
+            "  bots      {} by bots\n",
+            count(totals.commits_automation, "commit")
+        ));
+    }
+    text
+}
+
+/// A part of a whole as a percentage with no decimals. A part that is not
+/// nothing never reads 0%, and a part that is not everything never reads
+/// 100%. `whole` must not be 0.
+fn share(part: u64, whole: u64) -> String {
+    let rounded = (u128::from(part) * 100 + u128::from(whole) / 2) / u128::from(whole);
+    if part > 0 && rounded == 0 {
+        "under 1%".to_owned()
+    } else if part < whole && rounded == 100 {
+        "over 99%".to_owned()
+    } else {
+        format!("{rounded}%")
+    }
 }
 
 /// A number with a comma between each group of three digits: 1,122,175.
@@ -383,10 +448,97 @@ mod tests {
         let expected = format!(
             "fogline {} \u{b7} demo @ 822e353 (main)\n\
              \x20 files     2 (1,234 lines)\n\
-             \x20 history   2 commits, 1,250 lines added, 16 deleted\n",
+             \x20 history   2 commits, 1,250 lines added, 16 deleted\n\
+             \x20 agents    no agent signatures found\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(summary(&repository(), &files, Some(&history)), expected);
+    }
+
+    /// A commit by this author, with this message, that added this many
+    /// lines.
+    fn signed(added: u64, author: &str, message: &str) -> Commit {
+        Commit {
+            author_name: author.to_owned(),
+            message: message.to_owned(),
+            ..commit(1, added, 0)
+        }
+    }
+
+    const CLAUDE: &str = "Co-authored-by: Claude <noreply@anthropic.com>";
+    const CURSOR: &str = "Co-authored-by: Cursor <cursoragent@cursor.com>";
+
+    #[test]
+    fn the_agents_line_says_at_least_and_estimated() {
+        let history = history(vec![
+            signed(60, "Ada Example", &format!("Fix\n\n{CLAUDE}\n")),
+            // Two agents on one commit: it counts once, and each tool
+            // counts it.
+            signed(1, "Ada Example", &format!("Fix\n\n{CURSOR}\n{CLAUDE}\n")),
+            signed(9, "dependabot[bot]", "Bump a version\n"),
+            commit(0, 30, 0),
+        ]);
+        let text = summary(&repository(), &files(vec![]), Some(&history));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[3],
+            "  agents    at least 2 agent-attributed commits out of 4 (Claude Code 2, Cursor 1), \
+             with an estimated 61% of added lines"
+        );
+        assert_eq!(lines[4], "  bots      1 commit by bots");
+        assert_eq!(lines.len(), 5, "{text}");
+    }
+
+    #[test]
+    fn the_tools_with_the_most_commits_come_first() {
+        let history = history(vec![
+            signed(1, "Ada Example", &format!("Fix\n\n{CURSOR}\n")),
+            signed(1, "Ada Example", &format!("Fix\n\n{CURSOR}\n")),
+            signed(1, "Ada Example", &format!("Fix\n\n{CLAUDE}\n")),
+            signed(1, "devin-ai-integration[bot]", "Fix\n"),
+        ]);
+        let text = summary(&repository(), &files(vec![]), Some(&history));
+        // Claude Code comes before Devin in the table, and stays before it.
+        assert!(
+            text.contains("out of 4 (Cursor 2, Claude Code 1, Devin 1), with"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_agents_line_leaves_out_a_share_of_nothing() {
+        // Agent-attributed commits that added no line, such as merges.
+        let history = history(vec![signed(
+            0,
+            "Ada Example",
+            &format!("Merge\n\n{CLAUDE}\n"),
+        )]);
+        let text = summary(&repository(), &files(vec![]), Some(&history));
+        assert!(
+            text.ends_with(
+                "  agents    at least 1 agent-attributed commit out of 1 (Claude Code 1)\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_share_is_never_rounded_to_nothing_or_to_everything() {
+        let cases = [
+            (0, 10, "0%"),
+            (10, 10, "100%"),
+            (1, 2, "50%"),
+            (1, 3, "33%"),
+            (2, 3, "67%"),
+            (61, 100, "61%"),
+            (1, 1_000, "under 1%"),
+            (999, 1_000, "over 99%"),
+            (u64::MAX - 1, u64::MAX, "over 99%"),
+            (u64::MAX, u64::MAX, "100%"),
+        ];
+        for (part, whole, expected) in cases {
+            assert_eq!(share(part, whole), expected, "{part} of {whole}");
+        }
     }
 
     #[test]
