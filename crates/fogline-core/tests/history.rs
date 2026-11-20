@@ -160,7 +160,12 @@ fn reads_the_history_of_a_plain_repository() {
         Totals {
             commits: 5,
             merges: 0,
+            // No commit of F1 carries the mark of an agent or is a bot's.
+            commits_agent: 0,
+            commits_automation: 0,
             added: f1::ADDED,
+            added_agent: 0,
+            added_automation: 0,
             deleted: f1::DELETED,
         }
     );
@@ -254,7 +259,11 @@ fn reads_merges_renames_deletions_and_commits_that_change_nothing() {
         Totals {
             commits: 9,
             merges: 1,
+            commits_agent: 0,
+            commits_automation: 0,
             added: f3::ADDED,
+            added_agent: 0,
+            added_automation: 0,
             deleted: f3::DELETED,
         }
     );
@@ -273,7 +282,10 @@ fn sums_the_history_of_each_path() {
         paths["src/app.py"],
         PathHistory {
             commits: 2,
+            commits_agent: 0,
             added: 4,
+            added_agent: 0,
+            added_automation: 0,
             deleted: 2,
             authors: 1,
             first_at: start,
@@ -285,7 +297,10 @@ fn sums_the_history_of_each_path() {
         paths["src/doomed.py"],
         PathHistory {
             commits: 2,
+            commits_agent: 0,
             added: 2,
+            added_agent: 0,
+            added_automation: 0,
             deleted: 2,
             authors: 2,
             first_at: start,
@@ -943,6 +958,19 @@ fn a_repository_of_your_choice_passes_the_checks() {
         totals.deleted,
         aggregate::by_path(&alone).len(),
     );
+    println!(
+        "  at least {} agent-attributed commits with {} added lines; {} commits by bots with {}",
+        totals.commits_agent,
+        totals.added_agent,
+        totals.commits_automation,
+        totals.added_automation,
+    );
+    for sum in aggregate::by_signature(&alone) {
+        println!(
+            "  {}: {} commits, {} added lines",
+            sum.id, sum.commits, sum.added
+        );
+    }
 }
 
 // ---- What a commit's text may hold ----

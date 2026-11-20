@@ -6,7 +6,8 @@ Fogline is pre-alpha. Before proposing or changing anything, read `docs/plan.md`
 
 - `cargo xtask ci` runs everything CI runs. Run it before pushing. `--skip-viewer` leaves out the Node checks.
 - `cargo test -p fogline --test contract` runs the black-box contract tests. Set `FOGLINE_BIN` to point them at another binary.
-- `FOGLINE_HISTORY_REPO=<path> cargo test --release -p fogline-core --test history -- --ignored --nocapture` checks the history of any repository against one `git log` process and against other numbers of workers, and prints its totals. Django takes about a minute.
+- `FOGLINE_HISTORY_REPO=<path> cargo test --release -p fogline-core --test history -- --ignored --nocapture` checks the history of any repository against one `git log` process and against other numbers of workers, and prints its totals, the agent-attributed commits among them. Django takes about a minute.
+- `cargo test -p fogline-core --test signatures -- --ignored --nocapture` reads from GitHub the public commit behind every mark in the table of agent signatures and checks that the mark is on it. It needs the network and `gh`, signed in.
 - `pnpm --filter @fogline/viewer dev` starts the viewer's dev server.
 - `node scripts/npm-pack.mjs --dry-run` lists the npm packages a release would publish. `node scripts/pack-smoke.mjs target/release/fogline` installs them into an empty project and runs the result.
 - Rust comes from `rust-toolchain.toml` through rustup. Node comes from `.nvmrc` (`nvm use`); pnpm's version comes from `packageManager` in `package.json`.

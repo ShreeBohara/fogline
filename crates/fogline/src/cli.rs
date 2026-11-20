@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
     name = "fogline",
     version,
     about = "Maps which parts of a codebase arrived in agent-attributed commits.",
-    after_help = "Pre-alpha: `scan` counts a repository's files, lines and commits and prints a summary. It does not write a bundle or draw a map yet.",
+    after_help = "Pre-alpha: `scan` counts a repository's files, lines and commits, says how many commits are agent-attributed, and prints a summary. It does not write a bundle or draw a map yet.",
     arg_required_else_help = true,
     disable_help_subcommand = true
 )]

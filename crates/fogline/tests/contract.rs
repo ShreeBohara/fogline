@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use fogline_testkit::{f1, f3, f4, f5};
+use fogline_testkit::{f1, f2, f3, f4, f5};
 
 #[derive(Debug)]
 struct Outcome {
@@ -178,6 +178,14 @@ fn history_line(run: &Outcome) -> &str {
         .unwrap_or_default()
 }
 
+/// The line of the summary about agents. Empty when there is none.
+fn agents_line(run: &Outcome) -> &str {
+    run.stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("agents "))
+        .unwrap_or_default()
+}
+
 #[test]
 fn scan_counts_the_files_and_lines_of_a_plain_repository() {
     let fixture = f1::build().unwrap();
@@ -199,10 +207,68 @@ fn scan_counts_the_files_and_lines_of_a_plain_repository() {
             f1::DELETED
         )
     );
-    // Three lines and no more: nothing about this repository needs a note.
+    assert_eq!(agents_line(&run), "  agents    no agent signatures found");
+    // Four lines and no more: nothing about this repository needs a note.
     // An old git adds notes about itself, and the next test is about those.
     let about_git = notes_about_git(&run).len();
-    assert_eq!(run.stderr.lines().count() - about_git, 3, "{run:?}");
+    assert_eq!(run.stderr.lines().count() - about_git, 4, "{run:?}");
+}
+
+/// F2 has a commit for every agent signature, one by a bot, and a few by
+/// people. The count of commits reads "at least" and the share of lines
+/// reads "estimated": the first is a lower bound and the second a guess
+/// (spec section 5.2).
+#[test]
+fn scan_says_how_many_commits_are_agent_attributed() {
+    let fixture = f2::build().unwrap();
+    let run = scan(&fixture.path());
+    assert_eq!(run.code, Some(0), "{run:?}");
+
+    let commits = f2::commits();
+    let of_class = |class: f2::Class| commits.iter().filter(move |entry| entry.class == class);
+    let agents = of_class(f2::Class::AgentAttributed).count();
+    let agent_lines: u64 = of_class(f2::Class::AgentAttributed)
+        .map(|entry| entry.added)
+        .sum();
+    let lines: u64 = commits.iter().map(|entry| entry.added).sum();
+    let percent = (agent_lines * 100 + lines / 2) / lines;
+
+    let line = agents_line(&run);
+    let start = format!(
+        "  agents    at least {agents} agent-attributed commits out of {} (",
+        commits.len()
+    );
+    let end = format!("), with an estimated {percent}% of added lines");
+    assert!(line.starts_with(&start) && line.ends_with(&end), "{line}");
+    // The tools are named, each with the commits that carry its mark.
+    let tools = &line[start.len()..line.len() - end.len()];
+    let carrying = |id: &str| {
+        commits
+            .iter()
+            .filter(|entry| entry.signatures.contains(&id))
+            .count()
+    };
+    for (tool, id) in [
+        ("Claude Code", "claude-code"),
+        ("Cursor", "cursor"),
+        ("GitHub Copilot", "copilot"),
+        ("Devin", "devin"),
+    ] {
+        let piece = format!("{tool} {}", carrying(id));
+        assert!(
+            tools.split(", ").any(|part| part == piece),
+            "expected {piece:?} among {tools:?}"
+        );
+    }
+
+    let bots = of_class(f2::Class::Automation).count();
+    assert_eq!(bots, 1);
+    assert!(
+        run.stderr
+            .lines()
+            .any(|line| line == "  bots      1 commit by bots"),
+        "{run:?}"
+    );
 }
 
 /// The notes of a summary that are about the git that ran. They depend on
@@ -309,6 +375,8 @@ fn scan_with_history_none_reads_only_the_files() {
     assert_scanned(&run, F3_SHORT);
     assert_eq!(history_line(&run), "  history   not read (--history none)");
     assert_eq!(files_line(&run), files_line(&scan(&fixture.path())));
+    // Attribution comes from the history, so there is nothing to say.
+    assert_eq!(agents_line(&run), "");
 }
 
 #[test]
