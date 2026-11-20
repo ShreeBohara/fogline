@@ -47,8 +47,9 @@ jobs:
 
   # The same tests with git 2.25, the oldest the scan supports (spec section
   # 5.3). Every other job has a current git, and an old one behaves
-  # differently: it reads .gitattributes from the work tree, and in a partial
-  # clone it downloads a missing object even when it is told not to.
+  # differently: it reads .gitattributes from the work tree, in a partial
+  # clone it downloads a missing object even when it is told not to, and its
+  # minimal diff is not always the smallest one.
   rust-old-git:
     name: rust (git 2.25)
     runs-on: ubuntu-latest
