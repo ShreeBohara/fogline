@@ -541,12 +541,17 @@ Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today fr
 | Job | Runs on | Does |
 |---|---|---|
 | `rust` | Linux, macOS, Windows | rustfmt, clippy with warnings as errors, cargo-nextest. The black-box contract tests run here: they are integration tests of the `fogline` crate. |
+| `rust-old-git` | Linux, in an Ubuntu 20.04 container | The Rust tests again, with git 2.25.1 in place of a current git. 2.25 is the oldest git the scan supports (§5.3). The job stops before the tests if the git it installed is not 2.25. |
 | `viewer` | Linux | Biome, type check, Vitest, build; Playwright from M5 |
 | `launcher` | Linux on Node 18 and 26, Windows on Node 26 | The launcher's tests. Node 18 is the oldest version it supports. |
 | `pack-smoke` | The five runners in §5.8 | Build the release binary, run the pack script's tests, then `scripts/pack-smoke.mjs`: pack, install the tarballs into an empty project with install scripts off, and compare `npx fogline version --json` with what the binary prints when run directly. The Linux rows also check that the binary is static. From M3, one fixture scan. |
 | `schema-drift` | Linux | Regenerates the schema and the TypeScript types; fails on any diff |
 | `deny` | Linux | cargo-deny: advisories, licences, and a ban on HTTP client crates in the engine |
 | `workflows` | Linux | zizmor and actionlint on the workflows |
+
+`rust-old-git` is there because some of what §5.3 describes depends on git's version, and every other job has a current git. Git 2.25 ignores `GIT_ATTR_SOURCE`, so the scan records the caveat `attributes_from_work_tree`. It also ignores `GIT_NO_LAZY_FETCH`, so the scan's own search for missing objects is the only thing that keeps a scan of a partial clone from downloading.
+
+The job installs one exact build of git: the package `1:2.25.1-1ubuntu3`, which is the build Ubuntu 20.04 was released with. The newest build of that package, `1:2.25.1-1ubuntu3.14`, also calls itself 2.25.1, but a security update gave it `GIT_NO_LAZY_FETCH`. With that build a partial clone behaves as it does on a current git, and the job would pass without testing the download case. A version number does not say everything about a git that a distribution has patched. The released build still has the security bugs that the updates fixed, so the job checks the repository out before it installs git: the files arrive through GitHub's API, and the old git only ever reads the repositories that the tests build.
 
 **`release.yml`** runs a real release on a `v*` tag. Anything else is a dry run, which stops after step 3 and keeps what it built as workflow artifacts: started by hand, or by a pull request that changes the workflow, the pack script or the launcher.
 
@@ -582,6 +587,9 @@ Facts this section relies on, checked today:
 | A crates.io trusted publisher "can only be created after an initial manual publishing of a crate" | [RFC 3691](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html) |
 | Current action majors: checkout 7, setup-node 7, upload-artifact 7, download-artifact 8, attest 4, pnpm/action-setup 6. `attest-build-provenance` 4 is now a wrapper around `actions/attest`, and its README sends new workflows there. | GitHub releases |
 | An install with only the launcher and one platform tarball succeeds while the other four platform packages do not exist on the registry: npm treats an optional dependency it cannot find as skipped. | `node scripts/pack-smoke.mjs target/release/fogline`, run on 2026-11-15 with npm 11.20.0 |
+| In a clone made with `git clone --filter=blob:none --no-checkout`, `GIT_NO_LAZY_FETCH=1 git ls-tree -r -l HEAD` downloads every missing file with Ubuntu 20.04's git package at `1:2.25.1-1ubuntu3`. At `1:2.25.1-1ubuntu3.14` it downloads nothing and warns "lazy fetching disabled". `git rev-list --objects --missing=print --no-walk HEAD` downloads with neither. | Run on 2026-11-19 in the `ubuntu:20.04` image |
+| With the scan's search for missing objects taken out, `fogline scan` on such a clone of fixture F1 exits with 0 on the first of those builds, having downloaded all six files, and fails without downloading on the second. With the search in place, the tests pass on both. | The job's steps, run on 2026-11-19 in the `ubuntu:20.04` image with each build |
+| Upstream git reads `GIT_NO_LAZY_FETCH` from 2.45.0 on, and security releases of older series read it too: `promisor-remote.c` names the variable at the v2.39.4, v2.43.4 and v2.44.1 tags, and not at v2.25.1, v2.39.3 or v2.44.0. A version number alone therefore does not say whether a git honours it. | git's source |
 
 ---
 
