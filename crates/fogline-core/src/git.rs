@@ -1,4 +1,4 @@
-//! Calling the `git` executable.
+//! Calling the `git` executable, and reading what it prints.
 //!
 //! In Phase 1 every repository fact comes from git's own plumbing commands
 //! (spec section 5.3). Each call starts from [`command`], which pins the
@@ -35,6 +35,18 @@ impl Version {
     pub const ATTRIBUTES_FROM_COMMIT: Version = Version {
         major: 2,
         minor: 41,
+        patch: 0,
+    };
+
+    /// The first git whose minimal diff really is the smallest one. Older
+    /// gits first mark some lines as changed, as a shortcut, and that can
+    /// leave a diff longer than it has to be: in about 1.3% of the diffs of
+    /// git's own history, says the commit that ended it (git 03f2915541).
+    /// Git's `xdiff/xprepare.c` skips the shortcut for the minimal diff at
+    /// the v2.50.0 tag and not at v2.49.0.
+    pub const EXACT_MINIMAL_DIFF: Version = Version {
+        major: 2,
+        minor: 50,
         patch: 0,
     };
 
@@ -113,7 +125,14 @@ const REDIRECTING_VARIABLES: [&str; 8] = [
 ///   an object that is missing. A download is a network request and a write
 ///   into the repository, and the engine may do neither. Git has understood
 ///   this since 2.45.0 (its `environment.h` names it at the v2.45.0 tag and
-///   not at v2.44.0), so `files::list` also looks before it reads.
+///   not at v2.44.0), so the engine also looks before it reads
+///   (`Repository::missing_objects`).
+/// - `GIT_ATTR_NOSYSTEM=1`, `core.attributesFile=/dev/null`: ignore the
+///   attributes files of the machine and of the user. An attributes file
+///   can declare a file binary, which removes its line counts, so a line
+///   such as `*.py binary` in `~/.config/git/attributes` would change the
+///   numbers. Git reads `/dev/null` as an empty file on every platform,
+///   Windows included.
 /// - The variables in [`REDIRECTING_VARIABLES`] are removed, so the folder
 ///   git runs in is the only thing that decides which repository it reads.
 ///
@@ -127,9 +146,11 @@ pub fn command() -> Command {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("LC_ALL", "C")
         .args(["-c", "core.quotepath=false"])
         .args(["-c", "i18n.logOutputEncoding=UTF-8"])
+        .args(["-c", "core.attributesFile=/dev/null"])
         .stdin(Stdio::null());
     command
 }
@@ -149,15 +170,19 @@ pub fn output_in_with(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> Result
         .envs(env.iter().copied())
         .args(args)
         .output()
-        .map_err(|err| {
-            // Starting a process in a folder that does not exist also fails
-            // with "not found". Only call git missing when the folder is there.
-            if err.kind() == io::ErrorKind::NotFound && dir.is_dir() {
-                Error::NotFound
-            } else {
-                Error::Io(err)
-            }
-        })
+        .map_err(|err| could_not_start(err, dir))
+}
+
+/// The error for a git that could not be started in the folder `dir`.
+///
+/// Starting a process in a folder that does not exist also fails with "not
+/// found", so git is only called missing when the folder is there.
+pub(crate) fn could_not_start(err: io::Error, dir: &Path) -> Error {
+    if err.kind() == io::ErrorKind::NotFound && dir.is_dir() {
+        Error::NotFound
+    } else {
+        Error::Io(err)
+    }
 }
 
 /// Passes on the output of a git that succeeded, and turns one that failed
@@ -176,6 +201,34 @@ pub fn succeeded(args: &[&str], output: Output) -> Result<Output, Error> {
             stderr
         },
     })
+}
+
+/// Splits `-z` output into its records. Every record ends with a NUL, so
+/// output that ends any other way was cut short, and gives `None`.
+pub(crate) fn records(output: &[u8]) -> Option<Vec<&[u8]>> {
+    if output.is_empty() {
+        return Some(Vec::new());
+    }
+    let body = output.strip_suffix(&[0])?;
+    Some(body.split(|&byte| byte == 0).collect())
+}
+
+/// Reads a number made of ASCII digits and nothing else.
+pub(crate) fn number(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
+
+/// The error for output that could not be read. Only the start of the
+/// output goes into the message: the whole of it can be megabytes.
+pub(crate) fn unexpected(args: &[&str], output: &[u8]) -> Error {
+    let start = &output[..output.len().min(200)];
+    Error::Unexpected {
+        command: args.join(" "),
+        output: String::from_utf8_lossy(start).into_owned(),
+    }
 }
 
 /// Finds out which git is installed.
@@ -277,6 +330,7 @@ mod tests {
             ("GIT_OPTIONAL_LOCKS", "0"),
             ("GIT_TERMINAL_PROMPT", "0"),
             ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_ATTR_NOSYSTEM", "1"),
             ("LC_ALL", "C"),
         ] {
             assert!(
@@ -294,7 +348,9 @@ mod tests {
                 "-c",
                 "core.quotepath=false",
                 "-c",
-                "i18n.logOutputEncoding=UTF-8"
+                "i18n.logOutputEncoding=UTF-8",
+                "-c",
+                "core.attributesFile=/dev/null"
             ]
         );
     }
@@ -329,6 +385,42 @@ mod tests {
         let missing = Path::new("fogline-test-no-such-folder");
         let error = output_in(missing, &["--version"]).unwrap_err();
         assert!(matches!(error, Error::Io(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn splits_output_into_records_that_each_end_with_a_nul() {
+        assert_eq!(records(b""), Some(vec![]));
+        assert_eq!(records(b"a\0"), Some(vec![&b"a"[..]]));
+        assert_eq!(records(b"a\0\0b\0"), Some(vec![&b"a"[..], b"", b"b"]));
+        assert_eq!(records(b"a\0b"), None, "the last record has no end");
+        assert_eq!(records(b"a"), None);
+    }
+
+    #[test]
+    fn only_digits_are_a_number() {
+        assert_eq!(number(b"0"), Some(0));
+        assert_eq!(number(b"1122175"), Some(1_122_175));
+        for text in [
+            &b""[..],
+            b"-",
+            b"+1",
+            b"-1",
+            b" 1",
+            b"1.0",
+            b"99999999999999999999999",
+        ] {
+            assert_eq!(number(text), None, "{:?}", String::from_utf8_lossy(text));
+        }
+    }
+
+    #[test]
+    fn an_error_about_unreadable_output_quotes_only_its_start() {
+        let long = vec![b'x'; 5_000];
+        let Error::Unexpected { command, output } = unexpected(&["log", "-z"], &long) else {
+            panic!("expected the Unexpected variant");
+        };
+        assert_eq!(command, "log -z");
+        assert_eq!(output.len(), 200);
     }
 
     #[test]
