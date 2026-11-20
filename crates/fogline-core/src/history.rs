@@ -67,8 +67,9 @@ pub struct Change {
     pub path: String,
     /// The path the file had before, when this commit renamed it.
     pub renamed_from: Option<String>,
-    /// The lines the commit added to the file and deleted from it, counted
-    /// with git's minimal diff. Both are 0 for a binary file.
+    /// The lines the commit added to the file and deleted from it, as git's
+    /// default diff counts them: the numbers `git log --numstat` prints.
+    /// Both are 0 for a binary file.
     pub added: u64,
     pub deleted: u64,
     /// True for a file git treats as binary, which has no lines to count.
@@ -136,9 +137,14 @@ const DIFF_TREE: [&str; 13] = [
     // git only pairs the ones that are exactly alike.
     "-M50%",
     "-l1000",
-    // The smallest possible diff, so the numbers are the ones spec section
-    // 5.2 defines and do not depend on the tool that counts them.
-    "--diff-algorithm=minimal",
+    // Git's default way of diffing, asked for by name so that no setting
+    // can choose another. Its numbers are the ones `git log --numstat`
+    // prints. It stops looking for the smallest possible diff when the
+    // search gets expensive, and that is what bounds the time: a commit
+    // that rewrites a file of a million lines takes about a second. The
+    // smallest diff (`minimal`) took up to minutes for such a commit, and
+    // had no bound at all (spec section 5.2).
+    "--diff-algorithm=myers",
     // Numbers, not a patch; and NUL between the pieces, so that paths
     // arrive exactly as they are stored.
     "--numstat",
@@ -628,7 +634,7 @@ mod tests {
             "--root",
             "-M50%",
             "-l1000",
-            "--diff-algorithm=minimal",
+            "--diff-algorithm=myers",
             "--no-textconv",
             "--no-ext-diff",
             "--ignore-submodules=all",

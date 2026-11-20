@@ -3,8 +3,12 @@
 //! The engine takes its numbers from `git diff-tree`, run by several
 //! processes at once. These tests check them by three other routes:
 //!
-//! - by the definition in spec section 5.2: read both versions of every
-//!   changed file and work out the longest run of lines they share;
+//! - from the files themselves: read both versions of every changed file
+//!   and work out the smallest change that turns one into the other. Git's
+//!   count can never be below that, and where it is above, it is above by
+//!   the same number of added and deleted lines (spec section 5.2). On the
+//!   fixtures it is not above at all, except for one large file made to
+//!   show the difference;
 //! - against one `git log --numstat` process, which does the same work
 //!   without it being cut into runs;
 //! - against itself, with other numbers of workers.
@@ -345,7 +349,7 @@ fn sums_the_history_of_each_path() {
     );
 }
 
-// ---- Route one: the definition ----
+// ---- Route one: the files themselves ----
 
 /// One entry of a commit's tree: its mode and the id of its content.
 type Entry = (String, String);
@@ -399,9 +403,10 @@ fn longest_common_subsequence(old: &[&[u8]], new: &[&[u8]]) -> usize {
     row[new.len()]
 }
 
-/// The lines added and deleted between two versions of a file, by the
-/// definition in spec section 5.2, and whether the file is binary.
-fn by_definition(old: &[u8], new: &[u8]) -> (u64, u64, bool) {
+/// The fewest lines that can be added and deleted to turn `old` into `new`,
+/// and whether the file is binary. The lines both versions share stay: all
+/// the other new lines are added and all the other old lines are deleted.
+fn smallest_change(old: &[u8], new: &[u8]) -> (u64, u64, bool) {
     if is_binary(old) || is_binary(new) {
         return (0, 0, true);
     }
@@ -418,8 +423,11 @@ fn by_definition(old: &[u8], new: &[u8]) -> (u64, u64, bool) {
 }
 
 /// Checks every change of every commit against the two versions of the
-/// file, and checks that no changed file was left out.
-fn assert_follows_the_definition(found: &Repository, history: &History) {
+/// file, and checks that no changed file was left out. Returns how many
+/// added lines, over the whole history, git counted beyond the smallest
+/// change. Deleted lines need no count of their own: they are beyond it by
+/// the same number.
+fn lines_beyond_the_smallest_change(found: &Repository, history: &History) -> u64 {
     let dir = found.root.as_path();
     let mut trees: HashMap<String, BTreeMap<String, Entry>> = HashMap::new();
     let mut contents: HashMap<String, Vec<u8>> = HashMap::new();
@@ -439,10 +447,7 @@ fn assert_follows_the_definition(found: &Repository, history: &History) {
             .or_insert_with(|| git_in(dir, &[], &["cat-file", "blob", id]))
             .clone()
     };
-    // Before 2.50, git's minimal diff could be a little longer than the
-    // smallest one. It then counts the same number of extra lines on both
-    // sides.
-    let exact = found.git >= Version::EXACT_MINIMAL_DIFF;
+    let mut beyond = 0;
 
     for commit in &history.commits {
         if commit.is_merge() {
@@ -479,18 +484,17 @@ fn assert_follows_the_definition(found: &Repository, history: &History) {
 
             let old = content_of(before.get(old_path));
             let new = content_of(after.get(&change.path));
-            let (added, deleted, binary) = by_definition(&old, &new);
+            let (fewest_added, fewest_deleted, binary) = smallest_change(&old, &new);
             assert_eq!(change.binary, binary, "{context}");
-            if exact || binary {
-                assert_eq!(
-                    (change.added, change.deleted),
-                    (added, deleted),
-                    "{context}"
-                );
-            } else {
-                let extra = change.added.checked_sub(added).expect("never fewer lines");
-                assert_eq!(change.deleted, deleted + extra, "{context}");
-            }
+            // No diff is shorter than the smallest one. A longer one has as
+            // many extra deleted lines as extra added lines, because every
+            // diff has to end with the same file.
+            let extra = change
+                .added
+                .checked_sub(fewest_added)
+                .unwrap_or_else(|| panic!("fewer added lines than possible: {context}"));
+            assert_eq!(change.deleted, fewest_deleted + extra, "{context}");
+            beyond += extra;
         }
         assert!(
             unexplained.is_empty(),
@@ -498,6 +502,7 @@ fn assert_follows_the_definition(found: &Repository, history: &History) {
             subject(commit)
         );
     }
+    beyond
 }
 
 // ---- Route two: one git process ----
@@ -519,7 +524,7 @@ fn one_process(found: &Repository) -> Vec<(String, Vec<Change>)> {
             "--root",
             "-M50%",
             "-l1000",
-            "--diff-algorithm=minimal",
+            "--diff-algorithm=myers",
             "--no-textconv",
             "--no-ext-diff",
             "--ignore-submodules=all",
@@ -757,12 +762,14 @@ fn generated() -> io::Result<Fixture> {
 
 // ---- The checks ----
 
+/// On these fixtures git counts the smallest change exactly, not a line
+/// more, so the count is checked to the line.
 #[test]
-fn the_numbers_follow_the_definition() {
+fn the_numbers_are_the_smallest_change_on_the_fixtures() {
     for fixture in [f1::build().unwrap(), f3::build().unwrap()] {
         let found = discover(&fixture);
         let history = history::read(&found, 3).unwrap();
-        assert_follows_the_definition(&found, &history);
+        assert_eq!(lines_beyond_the_smallest_change(&found, &history), 0);
     }
 }
 
@@ -832,7 +839,7 @@ fn a_generated_history_passes_every_check() {
             .any(|change| change.added > 0 && change.deleted > 0)
     );
 
-    assert_follows_the_definition(&found, &alone);
+    assert_eq!(lines_beyond_the_smallest_change(&found, &alone), 0);
     assert!(
         agrees_with_one_process(&found, &alone),
         "one process disagrees"
@@ -845,12 +852,18 @@ fn a_generated_history_passes_every_check() {
     }
 }
 
-/// On small files every way of diffing finds the smallest diff. On a large
-/// file with many lines that repeat, git's default takes shortcuts and
-/// reports more changed lines than there have to be. The engine asks for
-/// the smallest diff, and this is a file where that shows.
+/// Git's default diff does not always find the smallest change. It stops
+/// searching when the search gets expensive, which is what keeps a huge
+/// file from taking minutes, and on a large file with many lines that
+/// repeat it then counts a few lines more than there have to be. The
+/// engine reports what git counts, and this is a file where the two
+/// differ: by 8 lines on each side.
+///
+/// So this test fails if the engine ever asks git for another diff, and it
+/// fails if a git ever counts this change differently. Every git from 2.25
+/// on gives these numbers (spec section 5.2).
 #[test]
-fn the_diff_is_the_smallest_one_even_where_gits_default_is_not() {
+fn a_large_rewrite_is_counted_as_git_counts_it() {
     let who = Identity {
         name: "Ada Example",
         email: "ada@example.com",
@@ -882,33 +895,22 @@ fn the_diff_is_the_smallest_one_even_where_gits_default_is_not() {
 
     let found = discover(&fixture);
     let history = history::read(&found, 2).unwrap();
-    assert_follows_the_definition(&found, &history);
 
-    // The check above would pass for any correct diff of a small file. What
-    // makes it mean something here: git's default really is longer.
+    // What git counts. The smallest change is 1,143 added and 1,456
+    // deleted lines, and the check below works that out from the two
+    // versions of the file.
     let rewrite = &history.commits[0].changes[0];
-    let default = git_in(
+    assert_eq!((rewrite.added, rewrite.deleted), (1151, 1464));
+    assert_eq!(lines_beyond_the_smallest_change(&found, &history), 8);
+
+    // It is what git prints when it is not told how to diff at all. This
+    // command reads no setting that could choose another way.
+    let plain = git_in(
         &found.root,
         &[],
-        &[
-            "diff",
-            "--numstat",
-            "--diff-algorithm=myers",
-            "HEAD~1",
-            "HEAD",
-        ],
+        &["diff-tree", "--numstat", "HEAD~1", "HEAD"],
     );
-    let default = String::from_utf8_lossy(&default).into_owned();
-    let default_added: u64 = default
-        .split('\t')
-        .next()
-        .and_then(|digits| digits.parse().ok())
-        .expect("a number of added lines");
-    assert!(
-        default_added > rewrite.added,
-        "git's default counts {default_added} added lines and the engine {}",
-        rewrite.added
-    );
+    assert_eq!(String::from_utf8_lossy(&plain), "1151\t1464\tbig.txt\n");
 }
 
 /// The same checks on any repository, for the ones too large to build in a
