@@ -23,6 +23,9 @@ pub const FILES: [&str; 6] = [
 /// The number of commits reachable from HEAD.
 pub const COMMITS: usize = 5;
 
+/// The lines of all six files together.
+pub const LINES: u64 = 30;
+
 const ADA: Identity = Identity {
     name: "Ada Example",
     email: "ada@example.com",

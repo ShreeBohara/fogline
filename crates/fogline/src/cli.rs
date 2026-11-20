@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
     name = "fogline",
     version,
     about = "Maps which parts of a codebase arrived in agent-attributed commits.",
-    after_help = "Pre-alpha: `version` is the only command that works so far.",
+    after_help = "Pre-alpha: `scan` finds a repository and counts its files and lines. It does not read history yet.",
     arg_required_else_help = true,
     disable_help_subcommand = true
 )]
@@ -21,7 +21,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Scan a repository and print a summary (not implemented yet)
+    /// Scan a repository and print a summary (files and lines so far; history is not read yet)
     Scan {
         /// The repository to scan, or any folder inside it
         #[arg(default_value = ".")]

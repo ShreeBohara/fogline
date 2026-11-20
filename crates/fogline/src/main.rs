@@ -19,6 +19,8 @@ use crate::cli::{Cli, Command};
 /// [`EXIT_USAGE`] on its own for arguments it cannot parse.
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
+/// Nothing here can be scanned as it is: no repository, no commits yet, or
+/// a partial clone that lacks objects the scan needs.
 const EXIT_NOT_A_REPOSITORY: u8 = 3;
 const EXIT_GIT_UNUSABLE: u8 = 4;
 

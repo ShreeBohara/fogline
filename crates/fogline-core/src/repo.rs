@@ -52,6 +52,13 @@ pub struct Repository {
     pub head: String,
     /// The branch HEAD is on, or `None` when HEAD is detached.
     pub branch: Option<String>,
+    /// The git that answered. Later steps check it for what it can do.
+    pub git: Version,
+    /// True for a partial clone: one made with `git clone --filter`, which
+    /// leaves some objects on its remote. Git downloads such an object when
+    /// a command asks for it, so everything that reads objects checks this
+    /// first.
+    pub partial_clone: bool,
 }
 
 /// Why there is no repository to scan.
@@ -113,7 +120,21 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     } else {
         ["rev-parse", "--show-toplevel"]
     };
-    let root = path_from_git(succeeded(&top, git::output_in(path, &top)?)?.stdout)?;
+    let root = path_from_git(git::succeeded(&top, git::output_in(path, &top)?)?.stdout)?;
+
+    const PROMISORS: [&str; 4] = [
+        "config",
+        "-z",
+        "--get-regexp",
+        r"^(extensions\.partialclone|remote\..*\.promisor)$",
+    ];
+    let output = git::output_in(&root, &PROMISORS)?;
+    // `config --get-regexp` exits with 1 when no setting matches.
+    let partial_clone = if output.status.code() == Some(1) {
+        false
+    } else {
+        promises_objects(&git::succeeded(&PROMISORS, output)?.stdout)
+    };
 
     const HEAD: [&str; 4] = ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"];
     let output = git::output_in(&root, &HEAD)?;
@@ -121,7 +142,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     if output.status.code() == Some(1) {
         return Err(Error::NoCommits(root));
     }
-    let output = succeeded(&HEAD, output)?;
+    let output = git::succeeded(&HEAD, output)?;
     let head = lossy(&output.stdout);
     if !is_object_id(&head, facts.object_format) {
         return Err(unexpected(&HEAD, &output).into());
@@ -133,7 +154,7 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
     let branch = if output.status.code() == Some(1) {
         None
     } else {
-        Some(lossy(&succeeded(&BRANCH, output)?.stdout))
+        Some(lossy(&git::succeeded(&BRANCH, output)?.stdout))
     };
 
     Ok(Repository {
@@ -144,7 +165,35 @@ pub fn discover(path: &Path) -> Result<Repository, Error> {
         object_format: facts.object_format,
         head,
         branch,
+        git: version,
+        partial_clone,
     })
+}
+
+/// Reads what `git config -z --get-regexp` printed for the settings that
+/// make a repository a partial clone, and says whether any of them is on.
+///
+/// Each record is `<key>` NEWLINE `<value>` NUL, or `<key>` NUL alone for a
+/// setting written without a value, which git reads as true.
+/// `extensions.partialclone` names the remote that holds the missing
+/// objects. `remote.<name>.promisor` is a yes-or-no setting. When in doubt
+/// the answer is yes: the price of a wrong yes is one extra check.
+fn promises_objects(output: &[u8]) -> bool {
+    output
+        .split(|&byte| byte == 0)
+        .filter(|record| !record.is_empty())
+        .any(|record| {
+            let mut parts = record.splitn(2, |&byte| byte == b'\n');
+            let key = parts.next().unwrap_or_default();
+            let Some(value) = parts.next() else {
+                return true;
+            };
+            if key.eq_ignore_ascii_case(b"extensions.partialclone") {
+                return !value.is_empty();
+            }
+            let off: [&[u8]; 5] = [b"false", b"no", b"off", b"0", b""];
+            !off.iter().any(|word| value.eq_ignore_ascii_case(word))
+        })
 }
 
 /// The four answers of the first `rev-parse` call, one per line.
@@ -206,22 +255,6 @@ fn is_object_id(text: &str, format: ObjectFormat) -> bool {
         && text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-/// Passes on a successful run, and turns a failed one into an error.
-fn succeeded(args: &[&str], output: Output) -> Result<Output, git::Error> {
-    if output.status.success() {
-        Ok(output)
-    } else {
-        let stderr = lossy(&output.stderr);
-        Err(git::Error::Failed {
-            stderr: if stderr.is_empty() {
-                format!("`git {}` failed with {}", args.join(" "), output.status)
-            } else {
-                stderr
-            },
-        })
-    }
 }
 
 fn unexpected(args: &[&str], output: &Output) -> git::Error {
@@ -302,6 +335,39 @@ mod tests {
             assert_eq!(
                 Facts::parse(output),
                 None,
+                "{:?}",
+                String::from_utf8_lossy(output)
+            );
+        }
+    }
+
+    #[test]
+    fn recognises_the_settings_of_a_partial_clone() {
+        let on: [&[u8]; 6] = [
+            b"remote.origin.promisor\ntrue\0",
+            b"remote.origin.promisor\nYes\0",
+            b"remote.origin.promisor\0",
+            b"remote.origin.promisor\n1\0",
+            b"extensions.partialclone\norigin\0",
+            b"remote.a.promisor\nfalse\0remote.b.promisor\ntrue\0",
+        ];
+        for output in on {
+            assert!(
+                promises_objects(output),
+                "{:?}",
+                String::from_utf8_lossy(output)
+            );
+        }
+        let off: [&[u8]; 5] = [
+            b"",
+            b"remote.origin.promisor\nfalse\0",
+            b"remote.origin.promisor\nOFF\0",
+            b"remote.origin.promisor\n0\0",
+            b"extensions.partialclone\n\0",
+        ];
+        for output in off {
+            assert!(
+                !promises_objects(output),
                 "{:?}",
                 String::from_utf8_lossy(output)
             );

@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use fogline_testkit::{f1, f4, f5};
+use fogline_testkit::{f1, f3, f4, f5};
 
 #[derive(Debug)]
 struct Outcome {
@@ -143,38 +143,149 @@ fn help_goes_to_stdout_and_names_the_commands() {
     }
 }
 
-// ---- scan: finding the repository (task 3.1) ----
+// ---- scan: finding the repository and listing its files (tasks 3.1, 3.2) ----
 //
-// Until counting lands, a scan that finds its repository still fails with
-// exit code 1 and says it is not implemented. Its message names the commit
-// it found, which is how these tests see what discovery did.
+// A scan prints its summary on stderr and nothing on stdout: stdout is kept
+// for data that was asked for. History is not read yet, and the summary
+// says so.
 
-/// F1's HEAD as git abbreviates it.
+/// The HEADs of F1 and F3 as git abbreviates them.
 const F1_SHORT: &str = "822e353";
+const F3_SHORT: &str = "a263f2c";
+
+/// A scan that worked: exit code 0, nothing on stdout, and a summary on
+/// stderr whose first line names the program and the commit.
+fn assert_scanned(run: &Outcome, commit: &str) {
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    let header = run.stderr.lines().next().unwrap_or_default();
+    assert!(header.starts_with("fogline "), "{run:?}");
+    assert!(header.contains(&format!(" @ {commit} ")), "{run:?}");
+}
+
+/// The line of the summary that reports the files.
+fn files_line(run: &Outcome) -> &str {
+    run.stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("files "))
+        .unwrap_or_default()
+}
+
+#[test]
+fn scan_counts_the_files_and_lines_of_a_plain_repository() {
+    let fixture = f1::build().unwrap();
+    let run = scan(&fixture.path());
+    assert_scanned(&run, F1_SHORT);
+
+    let header = run.stderr.lines().next().unwrap_or_default();
+    assert!(header.ends_with("\u{b7} repo @ 822e353 (main)"), "{run:?}");
+    assert_eq!(
+        files_line(&run),
+        format!("  files     {} ({} lines)", f1::FILES.len(), f1::LINES)
+    );
+    assert!(run.stderr.contains("  history   not read yet"), "{run:?}");
+}
+
+#[test]
+fn scan_reports_binary_files_and_skipped_submodules() {
+    let fixture = f3::build().unwrap();
+    let run = scan(&fixture.path());
+    assert_scanned(&run, F3_SHORT);
+    assert_eq!(
+        files_line(&run),
+        format!(
+            "  files     {} ({} lines, {} binary, 1 submodule skipped)",
+            f3::FILES.len(),
+            f3::LINES,
+            f3::BINARY_FILES
+        )
+    );
+}
+
+/// Rule 1 of the product: a scan never writes into the repository it reads.
+/// Every file under the fixture, its `.git` folder included, has to be the
+/// same byte for byte afterwards, and nothing may appear or disappear.
+#[test]
+fn scan_leaves_the_repository_exactly_as_it_was() {
+    let fixture = f3::build().unwrap();
+    let before = fixture.snapshot().unwrap();
+
+    let run = scan(&fixture.path());
+    assert_scanned(&run, F3_SHORT);
+
+    assert!(
+        fixture.snapshot().unwrap() == before,
+        "the scan changed the repository"
+    );
+}
+
+/// In a partial clone git downloads a missing object when a command asks
+/// for it. A scan never uses the network, so it stops instead, and the
+/// clone stays as it was.
+#[test]
+fn scan_of_a_partial_clone_that_lacks_its_files_exits_with_3_and_downloads_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(false).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = scan(&clone.path());
+    assert_fails(&run, 3, "is a partial clone");
+    assert!(
+        run.stderr
+            .contains("6 objects that this commit needs are not in it"),
+        "{run:?}"
+    );
+    assert!(run.stderr.contains("never downloads anything"), "{run:?}");
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
+}
+
+#[test]
+fn scan_of_a_partial_clone_that_has_its_files_works_and_downloads_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(true).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = scan(&clone.path());
+    assert_scanned(&run, F1_SHORT);
+    assert_eq!(files_line(&run), files_line(&scan(&source.path())));
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
+}
 
 #[test]
 fn scan_finds_the_repository_from_a_folder_inside_it() {
     let fixture = f1::build().unwrap();
-    let run = scan(&fixture.path().join("src"));
-    assert_fails(&run, 1, "not implemented");
-    assert!(run.stderr.contains(F1_SHORT), "{run:?}");
-    assert!(run.stderr.contains("on branch main"), "{run:?}");
+    let from_the_top = scan(&fixture.path());
+    let from_inside = scan(&fixture.path().join("src"));
+    assert_scanned(&from_inside, F1_SHORT);
+    assert_eq!(from_inside.stderr, from_the_top.stderr);
 }
 
 #[test]
 fn scan_reads_a_bare_repository() {
-    let original = f1::build().unwrap();
+    let original = f3::build().unwrap();
     let bare = original.git_clone(&["--bare"]).unwrap();
     let run = scan(&bare.path());
-    assert_fails(&run, 1, F1_SHORT);
+    assert_scanned(&run, F3_SHORT);
+    assert_eq!(files_line(&run), files_line(&scan(&original.path())));
 }
 
 #[test]
 fn scan_says_when_a_clone_is_shallow() {
     let fixture = f5::build().unwrap();
     let run = scan(&fixture.path());
-    assert_fails(&run, 1, "a shallow clone");
-    assert!(run.stderr.contains(F1_SHORT), "{run:?}");
+    assert_scanned(&run, F1_SHORT);
+    assert!(
+        run.stderr.contains("  note      this is a shallow clone"),
+        "{run:?}"
+    );
 }
 
 #[test]
@@ -184,7 +295,9 @@ fn scan_says_when_head_is_detached() {
         .git(["checkout", "--quiet", "--detach", "HEAD~1"])
         .unwrap();
     let run = scan(&fixture.path());
-    assert_fails(&run, 1, "(detached HEAD)");
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let header = run.stderr.lines().next().unwrap_or_default();
+    assert!(header.ends_with(" (detached)"), "{run:?}");
 }
 
 /// Git sets GIT_DIR while it runs hooks. A scan started from a hook must
@@ -196,7 +309,7 @@ fn scan_ignores_git_dir_in_the_environment() {
     let mut command = fogline_command([OsStr::new("scan"), fixture.path().as_os_str()]);
     command.env("GIT_DIR", other.path().join(".git"));
     let run = run(command);
-    assert_fails(&run, 1, F1_SHORT);
+    assert_scanned(&run, F1_SHORT);
 }
 
 #[test]

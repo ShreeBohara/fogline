@@ -7,8 +7,9 @@
 //! loudly instead of quietly changing what other tests see.
 
 pub mod f1;
+pub mod f3;
 pub mod f4;
 pub mod f5;
 mod repo;
 
-pub use repo::{Fixture, Identity, RepoBuilder};
+pub use repo::{Fixture, Identity, RepoBuilder, Snapshot};
