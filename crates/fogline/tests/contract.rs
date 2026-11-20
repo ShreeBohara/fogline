@@ -143,11 +143,10 @@ fn help_goes_to_stdout_and_names_the_commands() {
     }
 }
 
-// ---- scan: finding the repository and listing its files (tasks 3.1, 3.2) ----
+// ---- scan: the repository, its files and its history (tasks 3.1 to 3.3) ----
 //
 // A scan prints its summary on stderr and nothing on stdout: stdout is kept
-// for data that was asked for. History is not read yet, and the summary
-// says so.
+// for data that was asked for.
 
 /// The HEADs of F1 and F3 as git abbreviates them.
 const F1_SHORT: &str = "822e353";
@@ -171,6 +170,14 @@ fn files_line(run: &Outcome) -> &str {
         .unwrap_or_default()
 }
 
+/// The line of the summary that reports the history.
+fn history_line(run: &Outcome) -> &str {
+    run.stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("history "))
+        .unwrap_or_default()
+}
+
 #[test]
 fn scan_counts_the_files_and_lines_of_a_plain_repository() {
     let fixture = f1::build().unwrap();
@@ -183,7 +190,64 @@ fn scan_counts_the_files_and_lines_of_a_plain_repository() {
         files_line(&run),
         format!("  files     {} ({} lines)", f1::FILES.len(), f1::LINES)
     );
-    assert!(run.stderr.contains("  history   not read yet"), "{run:?}");
+    assert_eq!(
+        history_line(&run),
+        format!(
+            "  history   {} commits, {} lines added, {} deleted",
+            f1::COMMITS,
+            f1::ADDED,
+            f1::DELETED
+        )
+    );
+    // Three lines and no more: nothing about this repository needs a note.
+    // An old git adds notes about itself, and the next test is about those.
+    let about_git = notes_about_git(&run).len();
+    assert_eq!(run.stderr.lines().count() - about_git, 3, "{run:?}");
+}
+
+/// The notes of a summary that are about the git that ran. They depend on
+/// the machine, not on the repository.
+fn notes_about_git(run: &Outcome) -> Vec<&str> {
+    run.stderr
+        .lines()
+        .filter(|line| line.starts_with("  note      git "))
+        .collect()
+}
+
+/// The git that the binary found, as its major and minor number.
+fn git_in_use() -> (u32, u32) {
+    let run = fogline(["version", "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&run.stdout).expect("stdout is JSON");
+    let version = report["git"].as_str().expect("the version of git");
+    let mut numbers = version.split('.').map(str::parse::<u32>);
+    match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor),
+        _ => panic!("not a version of git: {version:?}"),
+    }
+}
+
+#[test]
+fn scan_notes_what_an_old_git_cannot_do() {
+    let fixture = f1::build().unwrap();
+    let run = scan(&fixture.path());
+    assert_scanned(&run, F1_SHORT);
+
+    // Spec section 5.2: before 2.41 git cannot read `.gitattributes` from
+    // the commit, and before 2.50 its minimal diff is not always the
+    // smallest one. A newer git gets neither note.
+    let git = git_in_use();
+    let mut expected = Vec::new();
+    if git < (2, 41) {
+        expected.push("reads .gitattributes from the work tree");
+    }
+    if git < (2, 50) {
+        expected.push("can count a few more added and deleted lines");
+    }
+    let notes = notes_about_git(&run);
+    assert_eq!(notes.len(), expected.len(), "{run:?}");
+    for (note, says) in notes.iter().zip(expected) {
+        assert!(note.contains(says), "expected {says:?} in {note:?}");
+    }
 }
 
 #[test]
@@ -200,6 +264,94 @@ fn scan_reports_binary_files_and_skipped_submodules() {
             f3::BINARY_FILES
         )
     );
+    assert_eq!(
+        history_line(&run),
+        format!(
+            "  history   {} commits (1 merge), {} lines added, {} deleted",
+            f3::COMMITS,
+            f3::ADDED,
+            f3::DELETED
+        )
+    );
+}
+
+/// History is read by several git processes at once. How many there are
+/// must not show in what a scan reports.
+#[test]
+fn scan_prints_the_same_summary_for_any_number_of_jobs() {
+    for fixture in [f1::build().unwrap(), f3::build().unwrap()] {
+        let path = fixture.path();
+        let by_default = scan(&path);
+        assert_eq!(by_default.code, Some(0), "{by_default:?}");
+        for jobs in ["1", "4", "11", "64"] {
+            let run = fogline([
+                OsStr::new("scan"),
+                OsStr::new("--jobs"),
+                OsStr::new(jobs),
+                path.as_os_str(),
+            ]);
+            assert_eq!(run.code, Some(0), "{run:?}");
+            assert_eq!(run.stdout, "", "{run:?}");
+            assert_eq!(run.stderr, by_default.stderr, "--jobs {jobs}");
+        }
+    }
+}
+
+#[test]
+fn scan_with_history_none_reads_only_the_files() {
+    let fixture = f3::build().unwrap();
+    let run = fogline([
+        OsStr::new("scan"),
+        OsStr::new("--history"),
+        OsStr::new("none"),
+        fixture.path().as_os_str(),
+    ]);
+    assert_scanned(&run, F3_SHORT);
+    assert_eq!(history_line(&run), "  history   not read (--history none)");
+    assert_eq!(files_line(&run), files_line(&scan(&fixture.path())));
+}
+
+#[test]
+fn a_number_of_jobs_that_is_not_1_to_64_is_a_usage_error() {
+    for jobs in ["0", "65", "many"] {
+        let run = fogline(["scan", "--jobs", jobs]);
+        assert_eq!(run.code, Some(2), "--jobs {jobs}: {run:?}");
+        assert_eq!(run.stdout, "", "{run:?}");
+        assert!(run.stderr.contains("--jobs"), "{run:?}");
+    }
+}
+
+#[test]
+fn a_history_choice_that_does_not_exist_is_a_usage_error() {
+    let run = fogline(["scan", "--history", "some"]);
+    assert_eq!(run.code, Some(2), "{run:?}");
+    assert_eq!(run.stdout, "", "{run:?}");
+    assert!(run.stderr.contains("--history"), "{run:?}");
+}
+
+/// A user's own attributes file can declare files binary, which removes
+/// their line counts. It must not reach a scan: the numbers describe the
+/// repository and not the machine it is scanned on.
+#[test]
+fn scan_ignores_the_attributes_file_of_the_user() {
+    let fixture = f3::build().unwrap();
+    let plain = scan(&fixture.path());
+    assert_scanned(&plain, F3_SHORT);
+
+    // Git looks for the file at `$XDG_CONFIG_HOME/git/attributes`.
+    let config = tempfile::tempdir().unwrap();
+    std::fs::create_dir(config.path().join("git")).unwrap();
+    std::fs::write(
+        config.path().join("git").join("attributes"),
+        "*.py binary\n*.md binary\n",
+    )
+    .unwrap();
+    let mut command = fogline_command([OsStr::new("scan"), fixture.path().as_os_str()]);
+    command.env("XDG_CONFIG_HOME", config.path());
+    let run = run(command);
+
+    assert_scanned(&run, F3_SHORT);
+    assert_eq!(run.stderr, plain.stderr);
 }
 
 /// Rule 1 of the product: a scan never writes into the repository it reads.
@@ -243,15 +395,63 @@ fn scan_of_a_partial_clone_that_lacks_its_files_exits_with_3_and_downloads_nothi
     );
 }
 
+/// Counting the lines of history needs every version of every file. A
+/// partial clone that checked out HEAD holds only the newest ones, so a
+/// scan of it stops too, and says how to scan the files alone.
 #[test]
-fn scan_of_a_partial_clone_that_has_its_files_works_and_downloads_nothing() {
+fn scan_of_a_partial_clone_without_its_history_exits_with_3_and_downloads_nothing() {
     let source = f1::build().unwrap();
     let clone = source.partial_clone(true).unwrap();
     let before = clone.snapshot().unwrap();
 
     let run = scan(&clone.path());
+    assert_fails(&run, 3, "is a partial clone");
+    assert!(
+        run.stderr
+            .contains("3 objects that its history needs are not in it"),
+        "{run:?}"
+    );
+    assert!(run.stderr.contains("never downloads anything"), "{run:?}");
+    assert!(run.stderr.contains("`--history none`"), "{run:?}");
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
+}
+
+#[test]
+fn scan_of_a_partial_clone_reads_the_files_when_history_is_left_out() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(true).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = fogline([
+        OsStr::new("scan"),
+        OsStr::new("--history"),
+        OsStr::new("none"),
+        clone.path().as_os_str(),
+    ]);
     assert_scanned(&run, F1_SHORT);
     assert_eq!(files_line(&run), files_line(&scan(&source.path())));
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
+}
+
+#[test]
+fn scan_of_a_partial_clone_that_lacks_nothing_works_and_downloads_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.complete_partial_clone().unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = scan(&clone.path());
+    assert_scanned(&run, F1_SHORT);
+    let whole = scan(&source.path());
+    assert_eq!(files_line(&run), files_line(&whole));
+    assert_eq!(history_line(&run), history_line(&whole));
 
     assert!(
         clone.snapshot().unwrap() == before,
@@ -274,7 +474,9 @@ fn scan_reads_a_bare_repository() {
     let bare = original.git_clone(&["--bare"]).unwrap();
     let run = scan(&bare.path());
     assert_scanned(&run, F3_SHORT);
-    assert_eq!(files_line(&run), files_line(&scan(&original.path())));
+    let from_the_work_tree = scan(&original.path());
+    assert_eq!(files_line(&run), files_line(&from_the_work_tree));
+    assert_eq!(history_line(&run), history_line(&from_the_work_tree));
 }
 
 #[test]
@@ -285,6 +487,11 @@ fn scan_says_when_a_clone_is_shallow() {
     assert!(
         run.stderr.contains("  note      this is a shallow clone"),
         "{run:?}"
+    );
+    // The one commit it holds looks like the first, adding every line.
+    assert_eq!(
+        history_line(&run),
+        format!("  history   1 commit, {} lines added, 0 deleted", f5::ADDED)
     );
 }
 

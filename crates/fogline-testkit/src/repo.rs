@@ -380,19 +380,35 @@ impl Fixture {
     /// git command asks for it.
     ///
     /// With `checkout`, cloning checks the files out, which downloads the
-    /// ones at HEAD. Without it, none of them is in the clone.
+    /// ones at HEAD. Their earlier versions stay behind. Without it, none
+    /// of them is in the clone.
     pub fn partial_clone(&self, checkout: bool) -> io::Result<Fixture> {
+        self.filtered_clone("blob:none", checkout)
+    }
+
+    /// Makes a partial clone that lacks nothing. It leaves behind only
+    /// files larger than a megabyte, and no fixture has one. Its settings
+    /// are still those of a partial clone, so it shows what a tool does
+    /// with one that happens to be complete.
+    pub fn complete_partial_clone(&self) -> io::Result<Fixture> {
+        self.filtered_clone("blob:limit=1m", true)
+    }
+
+    /// Clones this fixture with `git clone --filter=<filter>`.
+    fn filtered_clone(&self, filter: &str, checkout: bool) -> io::Result<Fixture> {
         // A repository serves partial clones only when it is told to.
         self.git(["config", "uploadpack.allowFilter", "true"])?;
-        // The clone later asks for each file by its id, and under version 0
-        // of git's transfer protocol a remote answers that only when it is
-        // told to. Version 0 is the default of git 2.25; from 2.29 on the
-        // default is version 2, which always answers. Without this setting
-        // git 2.25.1 cannot check the files out: "the remote end hung up
-        // unexpectedly". It also means that a download would succeed there,
-        // so a test that says "nothing was downloaded" proves something.
+        // A partial clone asks its remote for each file it left behind, by
+        // the file's id, and under version 0 of git's transfer protocol a
+        // remote answers that only when it is told to. Version 0 is the
+        // default of git 2.25; from 2.29 on the default is version 2, which
+        // always answers. Without this setting git 2.25.1 cannot check the
+        // files out: "the remote end hung up unexpectedly". It also means
+        // that a download would succeed there, so a test that says "nothing
+        // was downloaded" proves something.
         self.git(["config", "uploadpack.allowAnySHA1InWant", "true"])?;
-        let mut options = vec!["--filter=blob:none", "--no-local"];
+        let filter = format!("--filter={filter}");
+        let mut options = vec![filter.as_str(), "--no-local"];
         if !checkout {
             options.push("--no-checkout");
         }
