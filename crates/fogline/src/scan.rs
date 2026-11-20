@@ -13,7 +13,7 @@ use crate::{EXIT_FAILURE, EXIT_GIT_UNUSABLE, EXIT_NOT_A_REPOSITORY, EXIT_USAGE, 
 
 pub fn run(path: &Path) -> Result<(), Failure> {
     let found = repo::discover(path).map_err(explain)?;
-    let files = files::list(&found).map_err(|error| explain(Error::Git(error)))?;
+    let files = files::list(&found).map_err(|error| explain_listing(error, &found))?;
 
     // The summary is a message for a person, so it goes to stderr. stdout is
     // kept for data that was asked for (spec section 5.1, rule 2). If stderr
@@ -86,6 +86,24 @@ fn grouped(number: u64) -> String {
 fn count(number: u64, noun: &str) -> String {
     let plural = if number == 1 { "" } else { "s" };
     format!("{} {noun}{plural}", grouped(number))
+}
+
+/// The same for an error from listing the files.
+fn explain_listing(error: files::Error, found: &Repository) -> Failure {
+    match error {
+        files::Error::MissingObjects { missing } => Failure::new(
+            EXIT_NOT_A_REPOSITORY,
+            format!(
+                "the repository at {} is a partial clone, and {} that this commit needs {} not \
+                 in it. Fogline never downloads anything. Use a full clone, or fetch the missing \
+                 objects with git, then run it again.",
+                shown(&found.root),
+                count(missing, "object"),
+                if missing == 1 { "is" } else { "are" },
+            ),
+        ),
+        files::Error::Git(error) => explain(Error::Git(error)),
+    }
 }
 
 /// Turns an error into its exit code and a message that says what to do
@@ -175,6 +193,7 @@ mod tests {
             head: "822e3536cbae5f3404efab40519ba1de1102e6a0".to_owned(),
             branch: Some("main".to_owned()),
             git: Version::ATTRIBUTES_FROM_COMMIT,
+            partial_clone: false,
         }
     }
 
@@ -195,6 +214,26 @@ mod tests {
             lossy_paths: false,
             attributes_from_commit: true,
         }
+    }
+
+    #[test]
+    fn a_partial_clone_with_missing_objects_is_a_reason_to_stop() {
+        let failure = explain_listing(files::Error::MissingObjects { missing: 6 }, &repository());
+        assert_eq!(failure.code, EXIT_NOT_A_REPOSITORY);
+        assert!(
+            failure
+                .message
+                .contains("is a partial clone, and 6 objects that this commit needs are not in it"),
+            "{}",
+            failure.message
+        );
+        assert!(failure.message.contains("never downloads anything"));
+
+        let one = explain_listing(files::Error::MissingObjects { missing: 1 }, &repository());
+        assert!(
+            one.message
+                .contains("1 object that this commit needs is not in it")
+        );
     }
 
     #[test]

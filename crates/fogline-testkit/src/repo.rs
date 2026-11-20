@@ -1,5 +1,6 @@
 //! Building git repositories with every source of variation pinned.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
@@ -332,6 +333,11 @@ impl RepoBuilder {
     }
 }
 
+/// Everything under a fixture's folder: each file with its content, and
+/// each folder with `None`. Two snapshots are equal only if nothing was
+/// added, removed or changed in between.
+pub type Snapshot = BTreeMap<PathBuf, Option<Vec<u8>>>;
+
 /// A finished fixture repository. Its directory is deleted when this value
 /// is dropped.
 #[derive(Debug)]
@@ -367,6 +373,48 @@ impl Fixture {
         run(sandbox.git(args), None)?;
         let head = head_of(&sandbox)?;
         Ok(Fixture { sandbox, head })
+    }
+
+    /// Makes a partial clone of this fixture: one that leaves every file's
+    /// content on its remote, which is this fixture, to be downloaded when a
+    /// git command asks for it.
+    ///
+    /// With `checkout`, cloning checks the files out, which downloads the
+    /// ones at HEAD. Without it, none of them is in the clone.
+    pub fn partial_clone(&self, checkout: bool) -> io::Result<Fixture> {
+        // A repository serves partial clones only when it is told to.
+        self.git(["config", "uploadpack.allowFilter", "true"])?;
+        let mut options = vec!["--filter=blob:none", "--no-local"];
+        if !checkout {
+            options.push("--no-checkout");
+        }
+        self.git_clone(&options)
+    }
+
+    /// Records everything under the fixture's folder, its `.git` folder
+    /// included. Comparing the snapshots from before and after a scan shows
+    /// whether the scan left the repository alone.
+    pub fn snapshot(&self) -> io::Result<Snapshot> {
+        let root = self.path();
+        let mut found = Snapshot::new();
+        let mut folders = vec![root.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(&folder)? {
+                let entry = entry?;
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(&root)
+                    .map_err(io::Error::other)?
+                    .to_owned();
+                if entry.file_type()?.is_dir() {
+                    found.insert(relative, None);
+                    folders.push(path);
+                } else {
+                    found.insert(relative, Some(fs::read(&path)?));
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// Runs git inside the fixture and returns its trimmed standard output.

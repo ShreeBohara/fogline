@@ -140,7 +140,7 @@ Rules:
 
 1. `PATH` defaults to the current directory. Any directory inside a work tree resolves to the repository root. Bare repositories work, and so does a path inside a `.git` folder.
 2. Progress and messages go to stderr. stdout carries only data that was asked for (`--json`, `version`).
-3. Exit codes: `0` success · `1` unexpected failure · `2` usage error, including a `PATH` that does not exist or is not a folder · `3` not a git repository, or no commits yet · `4` git not found, or older than 2.25.
+3. Exit codes: `0` success · `1` unexpected failure · `2` usage error, including a `PATH` that does not exist or is not a folder · `3` not a git repository, no commits yet, or a partial clone that lacks objects the scan needs · `4` git not found, or older than 2.25.
 4. The scan never writes inside the repository, writes nowhere at all unless `--out` is given, and makes no network requests. Tests enforce all three (§7).
 5. `open` prints the URL, opens the default browser unless `--no-browser` or the `CI` variable is set, and serves until Ctrl-C.
 6. An error says what happened and what to do next. Example: `fogline: /tmp/x is not inside a git repository. Run it from a project folder, or pass a path.`
@@ -225,6 +225,10 @@ Rules:
 - `<empty-tree>` is the id printed by `git hash-object -t tree --stdin` on empty input. That command computes the id without writing an object.
 - `.gitattributes` can declare a file binary, which removes its line count. Left alone, git reads that file from the work tree: an uncommitted edit changes the numbers, and a bare repository ignores the file. Measured with git 2.52: a text file marked `binary` shows `-` in a work tree and 2 lines in a bare clone of the same commit. `GIT_ATTR_SOURCE=<head>` makes git read it from the commit instead. Git has had that variable since 2.41.0: its own `git.c` knows `--attr-source` at the v2.41.0 tag and not at v2.40.0. An older git ignores the variable, and the scan then records the caveat `attributes_from_work_tree`.
 - Known limit: a repository's own `info/attributes` file still applies, on every git. Git has no switch to ignore it.
+- A partial clone, made with `git clone --filter`, leaves objects on its remote, and git downloads one whenever a command asks for it. That is a network request and a write into the repository, so the scan prevents it twice. Measured with git 2.52 before this rule existed: `ls-tree -r -l` in a blobless clone with no checkout downloaded three blobs and added three packs.
+  - Every call sets `GIT_NO_LAZY_FETCH=1`. Git has honoured it since 2.45.0: its own `environment.h` names the variable at the v2.45.0 tag and not at v2.44.0.
+  - Discovery reads the configuration for a promisor remote (`git config -z --get-regexp` for `extensions.partialclone` and `remote.*.promisor`). In such a clone the scan first runs `git rev-list --objects --missing=print --no-walk <head>`, which lists missing objects instead of downloading them. Its code turns downloading off, and already did at v2.25.0, so this is safe on every supported git. If anything is missing, the scan stops with exit code 3 and says that it never downloads.
+  - A partial clone that has everything the commit needs is scanned as usual.
 - No command that writes is ever used: no `status`, no `mktree`, nothing that refreshes the index.
 
 Output shapes, verified today by reading the raw bytes:

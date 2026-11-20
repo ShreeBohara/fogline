@@ -109,6 +109,11 @@ const REDIRECTING_VARIABLES: [&str; 8] = [
 /// - `LC_ALL=C`: messages and sorting do not depend on the user's locale.
 /// - `core.quotepath=false`, `i18n.logOutputEncoding=UTF-8`: paths and
 ///   messages arrive as raw UTF-8 bytes.
+/// - `GIT_NO_LAZY_FETCH=1`: in a partial clone, fail instead of downloading
+///   an object that is missing. A download is a network request and a write
+///   into the repository, and the engine may do neither. Git has understood
+///   this since 2.45.0 (its `environment.h` names it at the v2.45.0 tag and
+///   not at v2.44.0), so `files::list` also looks before it reads.
 /// - The variables in [`REDIRECTING_VARIABLES`] are removed, so the folder
 ///   git runs in is the only thing that decides which repository it reads.
 ///
@@ -121,6 +126,7 @@ pub fn command() -> Command {
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("LC_ALL", "C")
         .args(["-c", "core.quotepath=false"])
         .args(["-c", "i18n.logOutputEncoding=UTF-8"])
@@ -270,6 +276,7 @@ mod tests {
         for (key, value) in [
             ("GIT_OPTIONAL_LOCKS", "0"),
             ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
             ("LC_ALL", "C"),
         ] {
             assert!(

@@ -28,6 +28,18 @@ fn finds_a_repository_from_its_top_folder() {
     assert_eq!(found.object_format, ObjectFormat::Sha1);
     assert!(!found.bare);
     assert!(!found.shallow);
+    assert!(!found.partial_clone);
+}
+
+#[test]
+fn notices_a_partial_clone() {
+    let source = f1::build().unwrap();
+    for checkout in [false, true] {
+        let clone = source.partial_clone(checkout).unwrap();
+        let found = repo::discover(&clone.path()).unwrap();
+        assert!(found.partial_clone, "checkout: {checkout}");
+        assert_eq!(found.head, f1::HEAD);
+    }
 }
 
 #[test]

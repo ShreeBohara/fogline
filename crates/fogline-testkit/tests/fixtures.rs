@@ -198,3 +198,56 @@ fn building_f3_twice_gives_the_same_repository() {
     let second = f3::build().unwrap();
     assert_eq!(first.head(), second.head());
 }
+
+/// The objects that HEAD's files and folders need and the clone lacks,
+/// listed by a command that never downloads.
+fn missing_at_head(fixture: &Fixture) -> usize {
+    fixture
+        .git([
+            "rev-list",
+            "--objects",
+            "--missing=print",
+            "--no-walk",
+            "HEAD",
+        ])
+        .expect("rev-list can run in the fixture")
+        .lines()
+        .filter(|line| line.starts_with('?'))
+        .count()
+}
+
+#[test]
+fn a_partial_clone_lacks_its_files_until_they_are_checked_out() {
+    let source = f1::build().unwrap();
+
+    let bare_bones = source.partial_clone(false).unwrap();
+    assert_eq!(bare_bones.head(), Some(f1::HEAD));
+    assert_eq!(missing_at_head(&bare_bones), f1::FILES.len());
+
+    let checked_out = source.partial_clone(true).unwrap();
+    assert_eq!(missing_at_head(&checked_out), 0);
+
+    for clone in [&bare_bones, &checked_out] {
+        let promisor = clone.git(["config", "remote.origin.promisor"]).unwrap();
+        assert_eq!(promisor, "true");
+    }
+}
+
+#[test]
+fn a_snapshot_notices_a_new_file_and_a_changed_one() {
+    let fixture = f1::build().unwrap();
+    let before = fixture.snapshot().unwrap();
+    assert!(
+        before.len() > 20,
+        "the snapshot should see the .git folder too"
+    );
+    assert!(fixture.snapshot().unwrap() == before);
+
+    std::fs::write(fixture.path().join("new.txt"), "new\n").unwrap();
+    assert!(fixture.snapshot().unwrap() != before);
+    std::fs::remove_file(fixture.path().join("new.txt")).unwrap();
+    assert!(fixture.snapshot().unwrap() == before);
+
+    std::fs::write(fixture.path().join("src/app.py"), "changed\n").unwrap();
+    assert!(fixture.snapshot().unwrap() != before);
+}

@@ -5,10 +5,8 @@
 //! Set `FOGLINE_BIN` to point them at another build, such as a release
 //! binary or a different implementation of the engine.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -173,34 +171,6 @@ fn files_line(run: &Outcome) -> &str {
         .unwrap_or_default()
 }
 
-/// Everything under `root`: each file with its content, each folder with
-/// `None`. Two snapshots are equal only if nothing was added, removed or
-/// changed.
-fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![root.to_owned()];
-    while let Some(folder) = folders.pop() {
-        for entry in fs::read_dir(&folder).expect("a folder of the fixture can be listed") {
-            let entry = entry.expect("its entries can be read");
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .expect("every entry is under the root")
-                .to_owned();
-            if entry.file_type().expect("an entry has a type").is_dir() {
-                found.insert(relative, None);
-                folders.push(path);
-            } else {
-                found.insert(
-                    relative,
-                    Some(fs::read(&path).expect("a file of the fixture can be read")),
-                );
-            }
-        }
-    }
-    found
-}
-
 #[test]
 fn scan_counts_the_files_and_lines_of_a_plain_repository() {
     let fixture = f1::build().unwrap();
@@ -238,24 +208,55 @@ fn scan_reports_binary_files_and_skipped_submodules() {
 #[test]
 fn scan_leaves_the_repository_exactly_as_it_was() {
     let fixture = f3::build().unwrap();
-    let before = snapshot(&fixture.path());
-    assert!(before.len() > 20, "the snapshot should see the repository");
+    let before = fixture.snapshot().unwrap();
 
     let run = scan(&fixture.path());
     assert_scanned(&run, F3_SHORT);
 
-    let after = snapshot(&fixture.path());
-    let names = |snapshot: &BTreeMap<PathBuf, Option<Vec<u8>>>| -> Vec<PathBuf> {
-        snapshot.keys().cloned().collect()
-    };
-    assert_eq!(
-        names(&after),
-        names(&before),
-        "something appeared or disappeared"
+    assert!(
+        fixture.snapshot().unwrap() == before,
+        "the scan changed the repository"
     );
-    for (path, content) in &before {
-        assert!(after[path] == *content, "{} changed", path.display());
-    }
+}
+
+/// In a partial clone git downloads a missing object when a command asks
+/// for it. A scan never uses the network, so it stops instead, and the
+/// clone stays as it was.
+#[test]
+fn scan_of_a_partial_clone_that_lacks_its_files_exits_with_3_and_downloads_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(false).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = scan(&clone.path());
+    assert_fails(&run, 3, "is a partial clone");
+    assert!(
+        run.stderr
+            .contains("6 objects that this commit needs are not in it"),
+        "{run:?}"
+    );
+    assert!(run.stderr.contains("never downloads anything"), "{run:?}");
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
+}
+
+#[test]
+fn scan_of_a_partial_clone_that_has_its_files_works_and_downloads_nothing() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(true).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let run = scan(&clone.path());
+    assert_scanned(&run, F1_SHORT);
+    assert_eq!(files_line(&run), files_line(&scan(&source.path())));
+
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "the scan changed the clone"
+    );
 }
 
 #[test]
@@ -355,6 +356,7 @@ fn scan_without_git_exits_with_4() {
 #[cfg(unix)]
 #[test]
 fn scan_with_a_git_older_than_2_25_exits_with_4() {
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = f1::build().unwrap();

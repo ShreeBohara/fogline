@@ -200,3 +200,44 @@ fn attributes_come_from_the_commit_not_the_work_tree() {
         assert_eq!(lines(&after_edit, "plain.txt"), -1);
     }
 }
+
+/// A partial clone leaves objects on its remote, and git downloads one
+/// whenever a command asks for it. That is a network request and a write
+/// into the repository, and a scan may do neither. With none of the files
+/// in the clone, listing has to stop, and the clone has to stay as it was.
+#[test]
+fn a_partial_clone_that_lacks_its_files_is_refused_and_left_alone() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(false).unwrap();
+    let found = repo::discover(&clone.path()).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let result = files::list(&found);
+
+    assert!(
+        matches!(result, Err(files::Error::MissingObjects { missing: 6 })),
+        "{result:?}"
+    );
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "listing changed the clone: something was downloaded"
+    );
+}
+
+/// With the files of the commit in the clone, there is nothing to download,
+/// and listing works as it does anywhere else.
+#[test]
+fn a_partial_clone_that_has_its_files_is_listed_and_left_alone() {
+    let source = f1::build().unwrap();
+    let clone = source.partial_clone(true).unwrap();
+    let found = repo::discover(&clone.path()).unwrap();
+    let before = clone.snapshot().unwrap();
+
+    let files = files::list(&found).unwrap();
+
+    assert_eq!(files, list(&source));
+    assert!(
+        clone.snapshot().unwrap() == before,
+        "listing changed the clone"
+    );
+}

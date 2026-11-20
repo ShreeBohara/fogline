@@ -64,11 +64,34 @@ impl Files {
     }
 }
 
+/// Why the files could not be listed.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The repository is a partial clone, and some of what this commit
+    /// needs was never downloaded. The engine does not download it.
+    #[error("{missing} of the objects this commit needs are not in the repository")]
+    MissingObjects { missing: u64 },
+    #[error(transparent)]
+    Git(#[from] git::Error),
+}
+
 /// Lists the files at the repository's HEAD.
-pub fn list(repo: &Repository) -> Result<Files, git::Error> {
+pub fn list(repo: &Repository) -> Result<Files, Error> {
     // The commit id, not the name HEAD: every command then reads the same
     // commit, even if someone commits while the scan runs.
     let head = repo.head.as_str();
+
+    // A partial clone leaves objects on its remote, and git downloads one
+    // whenever a command asks for it: a network request, and a write into
+    // the repository. A scan may do neither, so it looks first and stops if
+    // anything is missing. With everything present, the commands below
+    // have nothing to download.
+    if repo.partial_clone {
+        let missing = missing_objects(repo)?;
+        if missing > 0 {
+            return Err(Error::MissingObjects { missing });
+        }
+    }
 
     let tree_args = ["ls-tree", "-r", "-l", "-z", head];
     let tree = git::succeeded(&tree_args, git::output_in(&repo.root, &tree_args)?)?.stdout;
@@ -80,7 +103,7 @@ pub fn list(repo: &Repository) -> Result<Files, git::Error> {
     let output = git::succeeded(&EMPTY_TREE, git::output_in(&repo.root, &EMPTY_TREE)?)?;
     let empty_tree = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if empty_tree.is_empty() {
-        return Err(unexpected(&EMPTY_TREE, &output.stdout));
+        return Err(unexpected(&EMPTY_TREE, &output.stdout).into());
     }
 
     let numstat_args = [
@@ -161,6 +184,30 @@ pub fn list(repo: &Repository) -> Result<Files, git::Error> {
     // keeps the order right after a path had to be converted.
     files.entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Counts the objects that the commit's files and folders need and the
+/// repository does not have.
+///
+/// `rev-list --missing=print` lists them instead of downloading them. It
+/// turns downloading off itself, and already did at git 2.25.0, so this is
+/// safe on every git the engine supports.
+fn missing_objects(repo: &Repository) -> Result<u64, git::Error> {
+    let args = [
+        "rev-list",
+        "--objects",
+        "--missing=print",
+        "--no-walk",
+        repo.head.as_str(),
+    ];
+    let output = git::succeeded(&args, git::output_in(&repo.root, &args)?)?;
+    // A missing object is printed as `?` followed by its id.
+    let missing = output
+        .stdout
+        .split(|&byte| byte == b'\n')
+        .filter(|line| line.starts_with(b"?"))
+        .count();
+    Ok(missing as u64)
 }
 
 /// What an entry of a commit's tree is.

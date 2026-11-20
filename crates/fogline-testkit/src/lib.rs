@@ -12,4 +12,4 @@ pub mod f4;
 pub mod f5;
 mod repo;
 
-pub use repo::{Fixture, Identity, RepoBuilder};
+pub use repo::{Fixture, Identity, RepoBuilder, Snapshot};
