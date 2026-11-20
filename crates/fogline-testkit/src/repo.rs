@@ -398,6 +398,15 @@ impl Fixture {
     fn filtered_clone(&self, filter: &str, checkout: bool) -> io::Result<Fixture> {
         // A repository serves partial clones only when it is told to.
         self.git(["config", "uploadpack.allowFilter", "true"])?;
+        // A partial clone asks its remote for each file it left behind, by
+        // the file's id, and under version 0 of git's transfer protocol a
+        // remote answers that only when it is told to. Version 0 is the
+        // default of git 2.25; from 2.29 on the default is version 2, which
+        // always answers. Without this setting git 2.25.1 cannot check the
+        // files out: "the remote end hung up unexpectedly". It also means
+        // that a download would succeed there, so a test that says "nothing
+        // was downloaded" proves something.
+        self.git(["config", "uploadpack.allowAnySHA1InWant", "true"])?;
         let filter = format!("--filter={filter}");
         let mut options = vec![filter.as_str(), "--no-local"];
         if !checkout {

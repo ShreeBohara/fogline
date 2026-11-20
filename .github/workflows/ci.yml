@@ -45,6 +45,63 @@ jobs:
       - name: Test
         run: cargo nextest run --workspace --locked
 
+  # The same tests with git 2.25, the oldest the scan supports (spec section
+  # 5.3). Every other job has a current git, and an old one behaves
+  # differently: it reads .gitattributes from the work tree, in a partial
+  # clone it downloads a missing object even when it is told not to, and its
+  # minimal diff is not always the smallest one.
+  rust-old-git:
+    name: rust (git 2.25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Ubuntu 20.04 is the release that came with git 2.25. The image has no
+    # git and no Rust, so the steps below install both. It is pinned by its
+    # digest, as the actions are by their commits.
+    container:
+      image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # The default in a container is `sh`, which would not notice a
+        # failure on the left of a pipe.
+        shell: bash
+    env:
+      # In a container GitHub points HOME at a folder of its own. rustup
+      # reports that as an error, in three lines, and then carries on.
+      # /root is the home folder the image gives its user.
+      HOME: /root
+    steps:
+      # This runs before any git is installed, so the files come through
+      # GitHub's API. The old git below has known security bugs, and this
+      # way it only ever reads the repositories that the tests build.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `1:2.25.1-1ubuntu3` is the build Ubuntu 20.04 was released with. The
+      # newest build of the package is also called 2.25.1, but a security
+      # update gave it GIT_NO_LAZY_FETCH, which git 2.25 itself does not
+      # have. With that build this job would pass without testing what a
+      # scan does when git downloads regardless (spec section 8).
+      - name: Install git 2.25.1, and what rustup and the build need
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            git=1:2.25.1-1ubuntu3 curl ca-certificates build-essential
+      - name: Check that the tests will run with git 2.25
+        run: git --version | tee /dev/stderr | grep -q '^git version 2\.25\.'
+      - name: Install rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs |
+            sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Test
+        run: cargo test --workspace --locked
+
   viewer:
     name: viewer
     runs-on: ubuntu-latest
