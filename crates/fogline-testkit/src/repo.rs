@@ -93,8 +93,8 @@ impl Sandbox {
     }
 }
 
-/// Runs git to completion and returns its trimmed standard output.
-fn run(mut command: Command, input: Option<&str>) -> io::Result<String> {
+/// Runs git to completion and returns its standard output, byte for byte.
+fn run_bytes(mut command: Command, input: Option<&[u8]>) -> io::Result<Vec<u8>> {
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -111,7 +111,7 @@ fn run(mut command: Command, input: Option<&str>) -> io::Result<String> {
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("git's stdin was not captured"))?;
-        stdin.write_all(input.as_bytes())?;
+        stdin.write_all(input)?;
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
@@ -120,7 +120,26 @@ fn run(mut command: Command, input: Option<&str>) -> io::Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(output.stdout)
+}
+
+/// Runs git to completion and returns its trimmed standard output as text.
+fn run(command: Command, input: Option<&str>) -> io::Result<String> {
+    let stdout = run_bytes(command, input.map(str::as_bytes))?;
+    Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+}
+
+/// Makes `who` the author and the committer of the commit that `command`
+/// creates, at `unix_time` UTC.
+fn sign(command: &mut Command, who: Identity, unix_time: i64) {
+    let date = format!("{unix_time} +0000");
+    command
+        .env("GIT_AUTHOR_NAME", who.name)
+        .env("GIT_AUTHOR_EMAIL", who.email)
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_NAME", who.name)
+        .env("GIT_COMMITTER_EMAIL", who.email)
+        .env("GIT_COMMITTER_DATE", &date);
 }
 
 /// The commit HEAD points to, or `None` in a repository with no commits.
@@ -142,10 +161,22 @@ fn head_of(sandbox: &Sandbox) -> io::Result<Option<String>> {
     }
 }
 
+/// An entry that is written straight into git's index and has no file in
+/// the work tree: a symbolic link or a submodule.
+#[derive(Debug)]
+struct IndexOnly {
+    /// git's file mode: `120000` for a link, `160000` for a submodule.
+    mode: &'static str,
+    /// The blob that holds the link's target, or the submodule's commit.
+    id: String,
+    path: String,
+}
+
 /// Builds a git repository one commit at a time.
 #[derive(Debug)]
 pub struct RepoBuilder {
     sandbox: Sandbox,
+    index_only: Vec<IndexOnly>,
 }
 
 impl RepoBuilder {
@@ -161,11 +192,19 @@ impl RepoBuilder {
         for (key, value) in PINNED_CONFIG {
             run(sandbox.git(["config", key, value]), None)?;
         }
-        Ok(Self { sandbox })
+        Ok(Self {
+            sandbox,
+            index_only: Vec::new(),
+        })
     }
 
     /// Writes a file, creating its parent directories. `path` uses `/`.
     pub fn write(&self, path: &str, contents: &str) -> io::Result<()> {
+        self.write_bytes(path, contents.as_bytes())
+    }
+
+    /// Writes a file from raw bytes, for content that is not text.
+    pub fn write_bytes(&self, path: &str, contents: &[u8]) -> io::Result<()> {
         let target = self.sandbox.repo().join(path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -173,12 +212,102 @@ impl RepoBuilder {
         fs::write(target, contents)
     }
 
+    /// Deletes a file. The next commit records the deletion.
+    pub fn remove(&self, path: &str) -> io::Result<()> {
+        fs::remove_file(self.sandbox.repo().join(path))
+    }
+
+    /// Moves a file. A commit records only the result; git works out that
+    /// it was a rename later, when it compares the two commits.
+    pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let target = self.sandbox.repo().join(to);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(self.sandbox.repo().join(from), target)
+    }
+
+    /// Adds a symbolic link at `path` that points to `target`, from the next
+    /// commit on.
+    ///
+    /// The link goes straight into git's index and is never made on disk, so
+    /// the fixture is the same on systems that cannot make symbolic links.
+    pub fn symlink(&mut self, path: &str, target: &str) -> io::Result<()> {
+        // A link is stored as a blob whose content is the target.
+        let id = run(
+            self.sandbox.git(["hash-object", "-w", "--stdin"]),
+            Some(target),
+        )?;
+        self.index_only.push(IndexOnly {
+            mode: "120000",
+            id,
+            path: path.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// Adds a submodule entry at `path` pinned to `commit`, from the next
+    /// commit on. The commit does not have to exist anywhere: to the
+    /// repository that holds it, a submodule entry is only a pointer.
+    pub fn submodule(&mut self, path: &str, commit: &str) {
+        self.index_only.push(IndexOnly {
+            mode: "160000",
+            id: commit.to_owned(),
+            path: path.to_owned(),
+        });
+    }
+
+    /// Starts a branch at the current commit and switches to it.
+    pub fn start_branch(&self, name: &str) -> io::Result<()> {
+        run(self.sandbox.git(["checkout", "--quiet", "-b", name]), None)?;
+        Ok(())
+    }
+
+    /// Switches to a branch that already exists.
+    pub fn switch(&self, name: &str) -> io::Result<()> {
+        run(self.sandbox.git(["checkout", "--quiet", name]), None)?;
+        Ok(())
+    }
+
+    /// Merges `branch` into the current one. It always makes a merge commit,
+    /// also where git could simply have moved the branch forward. Returns
+    /// the new commit id.
+    pub fn merge(
+        &self,
+        who: Identity,
+        unix_time: i64,
+        branch: &str,
+        message: &str,
+    ) -> io::Result<String> {
+        let mut command = self.sandbox.git([
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            message,
+            branch,
+        ]);
+        sign(&mut command, who, unix_time);
+        run(command, None)?;
+        run(self.sandbox.git(["rev-parse", "HEAD"]), None)
+    }
+
     /// Stages every change and commits it, with `who` as both author and
     /// committer at `unix_time` UTC. The message is stored exactly as given.
     /// Returns the new commit id.
     pub fn commit(&self, who: Identity, unix_time: i64, message: &str) -> io::Result<String> {
         run(self.sandbox.git(["add", "--all"]), None)?;
-        let date = format!("{unix_time} +0000");
+        // `add --all` drops whatever has no file in the work tree, which
+        // includes these. Put them back every time.
+        for entry in &self.index_only {
+            let cacheinfo = format!("{},{},{}", entry.mode, entry.id, entry.path);
+            run(
+                self.sandbox
+                    .git(["update-index", "--add", "--cacheinfo", &cacheinfo]),
+                None,
+            )?;
+        }
         let mut command = self.sandbox.git([
             "commit",
             "--quiet",
@@ -187,13 +316,7 @@ impl RepoBuilder {
             "--cleanup=verbatim",
             "--file=-",
         ]);
-        command
-            .env("GIT_AUTHOR_NAME", who.name)
-            .env("GIT_AUTHOR_EMAIL", who.email)
-            .env("GIT_AUTHOR_DATE", &date)
-            .env("GIT_COMMITTER_NAME", who.name)
-            .env("GIT_COMMITTER_EMAIL", who.email)
-            .env("GIT_COMMITTER_DATE", &date);
+        sign(&mut command, who, unix_time);
         run(command, Some(message))?;
         run(self.sandbox.git(["rev-parse", "HEAD"]), None)
     }
@@ -254,5 +377,15 @@ impl Fixture {
         S: AsRef<OsStr>,
     {
         run(self.sandbox.git(args), None)
+    }
+
+    /// Runs git inside the fixture and returns its standard output byte for
+    /// byte, for answers that are not text: a blob, or a `-z` listing.
+    pub fn git_bytes<I, S>(&self, args: I) -> io::Result<Vec<u8>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        run_bytes(self.sandbox.git(args), None)
     }
 }
