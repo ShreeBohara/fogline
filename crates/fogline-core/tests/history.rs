@@ -12,8 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
+use std::process::Stdio;
 
 use fogline_core::aggregate::{self, PathHistory, Totals};
 use fogline_core::git::{self, Version};
@@ -942,6 +943,127 @@ fn a_repository_of_your_choice_passes_the_checks() {
         totals.deleted,
         aggregate::by_path(&alone).len(),
     );
+}
+
+// ---- What a commit's text may hold ----
+
+/// An author's name, an email and a message may hold any byte but NUL. Git
+/// keeps a control character such as 0x1F in a name as it is, so no such
+/// byte can stand between the fields of the log. A NUL does.
+#[test]
+fn an_author_may_have_a_control_character_in_the_name_and_the_email() {
+    let odd = Identity {
+        name: "Ada\u{1f}Example",
+        email: "ada\u{1f}@example.com",
+    };
+    let message = "First\u{1f}line\n\nA body\u{1f}line.\n";
+    let repo = RepoBuilder::new().unwrap();
+    repo.write("a.txt", "one\n").unwrap();
+    repo.commit(odd, 1_770_000_000, message).unwrap();
+    repo.write("a.txt", "one\ntwo\n").unwrap();
+    repo.commit(odd, 1_770_000_000 + DAY, "Second\n").unwrap();
+    let fixture = repo.finish().unwrap();
+
+    let history = read(&fixture);
+    assert_eq!(history.commits.len(), 2);
+    for commit in &history.commits {
+        assert_eq!(commit.author_name, odd.name);
+        assert_eq!(commit.author_email, odd.email);
+    }
+    assert_eq!(history.commits[0].message, "Second\n");
+    assert_eq!(history.commits[1].message, message);
+    assert_eq!(history.commits[1].author_time, 1_770_000_000);
+    // Two commits and one author.
+    assert_eq!(aggregate::by_path(&history)["a.txt"].authors, 1);
+}
+
+/// Stores a commit that no git command would write, and returns its id.
+/// `text` is the commit as git keeps it.
+fn store_commit(fixture: &Fixture, text: &[u8]) -> String {
+    let mut git = git::command()
+        .current_dir(fixture.path())
+        .args([
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            "--literally",
+            "--stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("git can be started");
+    git.stdin
+        .take()
+        .expect("standard input is a pipe")
+        .write_all(text)
+        .expect("git reads the commit");
+    let output = git.wait_with_output().expect("git can be waited for");
+    assert!(output.status.success(), "git did not store the commit");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Git handles a commit's text as a string that ends at the first NUL, so
+/// it never prints a NUL from inside a field, and every commit has its six
+/// fields whatever it holds. No git command writes a NUL into a commit, so
+/// these two are stored by hand.
+#[test]
+fn a_commit_that_holds_a_nul_byte_still_has_its_six_fields() {
+    let who = Identity {
+        name: "Ada Example",
+        email: "ada@example.com",
+    };
+    let repo = RepoBuilder::new().unwrap();
+    repo.write("a.txt", "one\n").unwrap();
+    let first = repo.commit(who, 1_770_000_000, "First\n").unwrap();
+    let fixture = repo.finish().unwrap();
+    let tree = fixture.git(["rev-parse", "HEAD^{tree}"]).unwrap();
+
+    let commit = |parent: &str, author: &str, message: &str| {
+        format!(
+            "tree {tree}\nparent {parent}\n\
+             author {author} <ada@example.com> 1770000100 +0000\n\
+             committer Ada Example <ada@example.com> 1770000100 +0000\n\n{message}"
+        )
+    };
+    let in_the_name = store_commit(&fixture, commit(&first, "Ad\0a", "Second\n").as_bytes());
+    let in_the_message = store_commit(
+        &fixture,
+        commit(&in_the_name, "Ada Example", "Thi\0rd\n").as_bytes(),
+    );
+    fixture
+        .git(["update-ref", "HEAD", in_the_message.as_str()])
+        .unwrap();
+
+    // All three commits, in order: no field was taken for another.
+    let history = read(&fixture);
+    let ids: Vec<&str> = history
+        .commits
+        .iter()
+        .map(|commit| commit.id.as_str())
+        .collect();
+    assert_eq!(ids, [&in_the_message, &in_the_name, &first]);
+
+    // The message ends where its NUL is.
+    assert_eq!(history.commits[0].message, "Thi");
+    assert_eq!(history.commits[0].author_name, "Ada Example");
+    // The author line ends where its NUL is, and git cannot read what is
+    // left of it: no name, no email and no date.
+    let cut_short = &history.commits[1];
+    assert_eq!(cut_short.author_name, "");
+    assert_eq!(cut_short.author_email, "");
+    assert_eq!(cut_short.author_time, 0);
+    assert!(cut_short.message.ends_with("Second\n"), "{cut_short:?}");
+    assert_eq!(history.commits[2].message, "First\n");
+    // Both hand-made commits keep the tree of the first, so only the first
+    // changed a file.
+    let changed: Vec<usize> = history
+        .commits
+        .iter()
+        .map(|commit| commit.changes.len())
+        .collect();
+    assert_eq!(changed, [0, 0, 1]);
 }
 
 // ---- Other kinds of repository ----

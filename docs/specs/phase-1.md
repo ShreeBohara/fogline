@@ -217,7 +217,7 @@ All repository access in Phase 1 goes through the `git` executable, version 2.25
 | HEAD | `git rev-parse --verify --quiet HEAD^{commit}` (exit 1 means no commits yet) and `git symbolic-ref --quiet --short HEAD` (exit 1 means HEAD is detached) |
 | Files and sizes | `git ls-tree -r -l -z <head>` |
 | Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> <head>`, with `GIT_ATTR_SOURCE=<head>` |
-| Commit metadata | `git log --topo-order -z --no-show-signature --format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%B <head>` |
+| Commit metadata | `git log --topo-order -z --no-show-signature --format=%H%x00%P%x00%at%x00%an%x00%ae%x00%B <head>` |
 | Commit order | The order `git log` printed. The commits that are not merges are cut into K runs of neighbours, as equal in length as they can be. |
 | Line statistics | K workers, each `git diff-tree --stdin --always -r --root -M50% -l1000 --diff-algorithm=minimal --numstat -z --no-textconv --no-ext-diff --ignore-submodules=all`, with `GIT_ATTR_SOURCE=<head>`, fed one run on stdin |
 | Missing objects, in a partial clone only | `git rev-list --objects --no-object-names --missing=print <head>`, with `--no-walk` before the files are listed and without it before history is read |
@@ -250,9 +250,11 @@ Output shapes, verified today by reading the raw bytes:
 | Rename record | `<added>` TAB `<deleted>` TAB NUL `<old path>` NUL `<new path>` NUL |
 | Binary file | `-` for both counts |
 | Merge commit | never sent to `diff-tree`, so it has no records by construction |
-| Metadata record | fields separated by 0x1F, record ended by NUL; the message is the last field because it may contain 0x1F |
+| Metadata record | six fields, each ended by NUL: id, parents, author date, author name, author email, message |
 
 A path is never taken for a commit id, even one that looks like one: a path comes after two tabs, or right after a rename's numbers, where the next two tokens are read as paths whatever they hold.
+
+NUL ends every field of the metadata because it is the one byte no field can hold. Any other byte can be inside a name, an email or a message. Measured with git 2.52: a commit whose author name has the control character 0x1F in the middle keeps that name as it is, and a format with 0x1F between its fields then cut the name in two, took its second half for the email, and put the real email into the message. Git handles a commit's text as a string that ends at the first NUL. Measured with git 2.52 on commits stored by hand: with a NUL in the message, the message ends there; with a NUL in the author line, the date, the name and the email are empty; and each commit still prints its six fields. Two tests repeat both measurements with the git that runs them. The parser checks the shape as well: the number of fields has to be a multiple of six, and every id, parent and date has to look like one, so output with a field too many or too few is refused.
 
 Every commit that is sent has to come back. `diff-tree --stdin` skips what it cannot use and still exits with 0. Measured with git 2.52 in one run: an id that names no object printed nothing, a last line without a line break was ignored, a line that is not an id was copied to the output, and git exited with 0. Without `--always` a commit that changed nothing prints nothing either, so a skipped commit could not be told from an empty one. With it, the parser checks that the ids in the output are exactly the ids that were sent, in that order, and anything else is an error.
 

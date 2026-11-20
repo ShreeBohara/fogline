@@ -102,10 +102,20 @@ pub enum Error {
 pub const MOST_JOBS: usize = 64;
 
 /// What `git log` prints for each commit: its id, its parents, the author's
-/// date, name and email, and the whole message. The byte 0x1F stands
-/// between the fields, and `-z` ends each commit with a NUL. The message is
-/// last because it is the one field that may hold a 0x1F itself.
-const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%B";
+/// date, name and email, and the whole message. A NUL ends every field:
+/// the format puts one after each of the first five, and `-z` puts one
+/// after the message.
+///
+/// NUL is the one byte that cannot be inside a field, because git handles
+/// a commit's text as a string that ends at the first NUL. Every other
+/// byte can be: an author's name may hold a control character such as
+/// 0x1F. With that byte between the fields, such a name would be cut in
+/// two: its second half would be read as the email, and the email as the
+/// start of the message.
+const LOG_FORMAT: &str = "--format=%H%x00%P%x00%at%x00%an%x00%ae%x00%B";
+
+/// How many fields [`LOG_FORMAT`] prints for each commit.
+const LOG_FIELDS: usize = 6;
 
 /// The command each worker runs. Every option that could change a number
 /// is spelled out, so the user's git configuration cannot.
@@ -299,19 +309,16 @@ fn cut<T>(items: &[T], parts: usize) -> Vec<&[T]> {
 /// Reads the output of `git log -z` with [`LOG_FORMAT`]. Returns `None` for
 /// anything that does not have that shape.
 fn parse_log(output: &[u8], format: ObjectFormat) -> Option<Vec<Commit>> {
-    let mut commits = Vec::new();
-    for record in git::records(output)? {
-        // Six fields and no more: whatever follows the fifth separator is
-        // the message, separators included.
-        let mut fields = record.splitn(6, |&byte| byte == 0x1f);
-        let (id, parents, time, name, email, message) = (
-            fields.next()?,
-            fields.next()?,
-            fields.next()?,
-            fields.next()?,
-            fields.next()?,
-            fields.next()?,
-        );
+    // Every field ends with a NUL, so the output is one run of fields, six
+    // for each commit. A field too many or too few would shift every field
+    // after it; the count and the checks below refuse that.
+    let fields = git::records(output)?;
+    let (per_commit, left_over) = fields.as_chunks::<LOG_FIELDS>();
+    if !left_over.is_empty() {
+        return None;
+    }
+    let mut commits = Vec::with_capacity(per_commit.len());
+    for &[id, parents, time, name, email, message] in per_commit {
         if !repo::is_object_id(id, format) {
             return None;
         }
@@ -360,17 +367,44 @@ fn lossy(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// What git 2.52 printed for a small history: a commit with a body, a
-    /// merge with two parents, and the first commit, which has none.
-    const LOG: &[u8] = b"0e33afdfb8427308d454c100c3f639a1831e6b47\x1f\
-        f4159aae765ca47aeafe17916999e367e9634a4c\x1f1770000800\x1f\
-        Grace Example\x1fgrace@example.com\x1f\
-        Awkward files\n\nA body line.\nCo-authored-by: Someone <someone@example.com>\n\0\
-        07b4e0f0082b28fc085d7e07b8382f8bb9236b29\x1f\
-        c65c907b34604fdcd4cd618b012ab4b8f2dac353 c116e98fd4a8ca8fd78a57350eabd91ff75640d0\x1f\
-        1770000300\x1fAda\x1fada@example.com\x1fMerge\n\0\
-        bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f1770000000\x1f\
-        Ada Example\x1fada@example.com\x1fStart\n\0";
+    /// Fields as `git log` prints them, with a NUL after each.
+    fn joined(fields: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for field in fields {
+            bytes.extend_from_slice(field);
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    const ID: &[u8] = b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873";
+
+    /// A small history: a commit with a body, a merge with two parents, and
+    /// the first commit, which has none.
+    fn log() -> Vec<u8> {
+        joined(&[
+            b"0e33afdfb8427308d454c100c3f639a1831e6b47",
+            b"f4159aae765ca47aeafe17916999e367e9634a4c",
+            b"1770000800",
+            b"Grace Example",
+            b"grace@example.com",
+            b"Awkward files\n\nA body line.\nCo-authored-by: Someone <someone@example.com>\n",
+            // The merge.
+            b"07b4e0f0082b28fc085d7e07b8382f8bb9236b29",
+            b"c65c907b34604fdcd4cd618b012ab4b8f2dac353 c116e98fd4a8ca8fd78a57350eabd91ff75640d0",
+            b"1770000300",
+            b"Ada",
+            b"ada@example.com",
+            b"Merge\n",
+            // The first commit.
+            ID,
+            b"",
+            b"1770000000",
+            b"Ada Example",
+            b"ada@example.com",
+            b"Start\n",
+        ])
+    }
 
     fn parsed(output: &[u8]) -> Option<Vec<Commit>> {
         parse_log(output, ObjectFormat::Sha1)
@@ -378,7 +412,7 @@ mod tests {
 
     #[test]
     fn reads_the_commits() {
-        let commits = parsed(LOG).unwrap();
+        let commits = parsed(&log()).unwrap();
         assert_eq!(commits.len(), 3);
 
         let newest = &commits[0];
@@ -400,14 +434,36 @@ mod tests {
         assert!(!commits[2].is_merge());
     }
 
+    /// NUL is the only byte a field cannot hold. The control character 0x1F
+    /// stands for all the others here: git keeps it in an author's name.
     #[test]
-    fn a_message_may_hold_the_separator_and_may_be_empty() {
-        let record =
-            b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f5\x1fA\x1fa@b\x1fone\x1ftwo\n\0\
-            c65c907b34604fdcd4cd618b012ab4b8f2dac353\x1f\x1f6\x1fA\x1fa@b\x1f\0";
-        let commits = parsed(record).unwrap();
+    fn a_name_an_email_and_a_message_may_hold_any_byte_but_nul() {
+        let output = joined(&[
+            ID,
+            b"",
+            b"5",
+            b"Ada\x1fExample",
+            b"ada\x1f@example.com",
+            b"one\x1ftwo\n",
+        ]);
+        let commits = parsed(&output).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].author_name, "Ada\u{1f}Example");
+        assert_eq!(commits[0].author_email, "ada\u{1f}@example.com");
         assert_eq!(commits[0].message, "one\u{1f}two\n");
-        assert_eq!(commits[1].message, "");
+    }
+
+    /// What git prints for a commit whose author line it cannot read and
+    /// whose message is empty: the id, and five fields with nothing in them.
+    #[test]
+    fn every_field_but_the_id_may_be_empty() {
+        let commits = parsed(&joined(&[ID, b"", b"", b"", b"", b""])).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].parents, 0);
+        assert_eq!(commits[0].author_time, 0);
+        assert_eq!(commits[0].author_name, "");
+        assert_eq!(commits[0].author_email, "");
+        assert_eq!(commits[0].message, "");
     }
 
     #[test]
@@ -428,49 +484,106 @@ mod tests {
 
     #[test]
     fn names_that_are_not_utf8_are_converted() {
-        let record =
-            b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f5\x1fJos\xe9\x1fa@b\x1fHi\n\0";
-        let commits = parsed(record).unwrap();
+        let output = joined(&[ID, b"", b"5", b"Jos\xe9", b"a@b", b"Hi\n"]);
+        let commits = parsed(&output).unwrap();
         assert_eq!(commits[0].author_name, "Jos\u{fffd}");
     }
 
     #[test]
     fn an_id_has_the_length_the_repository_uses() {
         // A SHA-1 id in a repository that uses SHA-256, and the reverse.
-        assert_eq!(parse_log(LOG, ObjectFormat::Sha256), None);
-        let long = b"3f9c2a1d5e7b8c9d0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071\x1f\x1f5\x1fA\x1fa@b\x1fHi\n\0";
+        assert_eq!(parse_log(&log(), ObjectFormat::Sha256), None);
+        let long = joined(&[
+            b"3f9c2a1d5e7b8c9d0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+            b"",
+            b"5",
+            b"A",
+            b"a@b",
+            b"Hi\n",
+        ]);
         assert_eq!(
-            parse_log(long, ObjectFormat::Sha256).map(|c| c.len()),
+            parse_log(&long, ObjectFormat::Sha256).map(|c| c.len()),
             Some(1)
         );
-        assert_eq!(parsed(long), None);
+        assert_eq!(parsed(&long), None);
     }
 
     /// Output that was cut short must be refused, never half-read, and
-    /// never a crash. A prefix is acceptable only where it ends a record.
+    /// never a crash. A prefix is acceptable only where it ends a commit:
+    /// after a NUL, with six fields for every commit before it.
     #[test]
     fn output_cut_short_is_refused() {
-        for end in 0..=LOG.len() {
-            let prefix = &LOG[..end];
-            let whole_records = prefix.is_empty() || prefix.ends_with(&[0]);
-            assert_eq!(parsed(prefix).is_some(), whole_records, "cut at {end}");
+        let log = log();
+        for end in 0..=log.len() {
+            let prefix = &log[..end];
+            let fields = prefix.iter().filter(|&&byte| byte == 0).count();
+            let whole_commits = fields % LOG_FIELDS == 0 && (end == 0 || prefix.ends_with(&[0]));
+            assert_eq!(parsed(prefix).is_some(), whole_commits, "cut at {end}");
         }
     }
 
     #[test]
     fn output_of_another_shape_is_refused() {
-        let cases: [(&str, &[u8]); 7] = [
-            ("five fields", b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f5\x1fA\x1fa@b\0"),
-            ("an id that is too short", b"bdb0b8f\x1f\x1f5\x1fA\x1fa@b\x1fHi\n\0"),
-            ("an id in capitals", b"BDB0B8F4401BBF199EE7650A8C1229DC146B9873\x1f\x1f5\x1fA\x1fa@b\x1fHi\n\0"),
-            ("a parent that is not an id", b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1fHEAD\x1f5\x1fA\x1fa@b\x1fHi\n\0"),
-            ("a date that is not a number", b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1fnoon\x1fA\x1fa@b\x1fHi\n\0"),
-            ("a line about a signature first", b"No signature\nbdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f5\x1fA\x1fa@b\x1fHi\n\0"),
-            ("an empty record", b"\0"),
+        let cases: [(&str, Vec<u8>); 10] = [
+            ("five fields", joined(&[ID, b"", b"5", b"A", b"a@b"])),
+            (
+                "seven fields",
+                joined(&[ID, b"", b"5", b"A", b"a@b", b"Hi\n", b"more"]),
+            ),
+            (
+                "a field too many in one commit and one too few in the next",
+                joined(&[
+                    ID, b"", b"5", b"A", b"a@b", b"Hi\n", b"more", ID, b"", b"5", b"A", b"a@b",
+                ]),
+            ),
+            (
+                "an id that is too short",
+                joined(&[b"bdb0b8f", b"", b"5", b"A", b"a@b", b"Hi\n"]),
+            ),
+            (
+                "an id in capitals",
+                joined(&[
+                    b"BDB0B8F4401BBF199EE7650A8C1229DC146B9873",
+                    b"",
+                    b"5",
+                    b"A",
+                    b"a@b",
+                    b"Hi\n",
+                ]),
+            ),
+            (
+                "a parent that is not an id",
+                joined(&[ID, b"HEAD", b"5", b"A", b"a@b", b"Hi\n"]),
+            ),
+            (
+                "a date that is not a number",
+                joined(&[ID, b"", b"noon", b"A", b"a@b", b"Hi\n"]),
+            ),
+            (
+                "a line about a signature first",
+                joined(&[
+                    b"No signature\nbdb0b8f4401bbf199ee7650a8c1229dc146b9873",
+                    b"",
+                    b"5",
+                    b"A",
+                    b"a@b",
+                    b"Hi\n",
+                ]),
+            ),
+            (
+                "another byte between the fields",
+                b"bdb0b8f4401bbf199ee7650a8c1229dc146b9873\x1f\x1f5\x1fA\x1fa@b\x1fHi\n\0".to_vec(),
+            ),
+            ("one empty field", vec![0]),
         ];
         for (what, output) in cases {
-            assert_eq!(parsed(output), None, "{what}");
+            assert_eq!(parsed(&output), None, "{what}");
         }
+    }
+
+    #[test]
+    fn the_log_format_prints_the_fields_the_parser_counts() {
+        assert_eq!(LOG_FORMAT.matches("%x00").count() + 1, LOG_FIELDS);
     }
 
     #[test]
