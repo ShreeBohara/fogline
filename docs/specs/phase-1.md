@@ -131,7 +131,7 @@ fogline version [--json]                also: --version
 
 scan options (accepted by open and export too):
   --history <all|none>    default all
-  --jobs <n>              default min(cores, 12)
+  --jobs <n>              1 to 64; default min(cores, 12)
 global options:
   --quiet   --verbose   --color <auto|always|never>   --timings
 ```
@@ -149,11 +149,13 @@ Illustrative output of `fogline` on a large repository with no agent signatures:
 
 ```
 fogline 0.1.0 · django @ f24f38c (main)
-  files     7,102 (1,122,175 lines)                          0.3 s
-  history   35,123 commits, 11 workers                       2.4 s
+  files     7,102 (1,122,175 lines, 1,379 binary)
+  history   35,123 commits (591 merges), 3,378,909 lines added, 2,253,367 deleted
   agents    no agent signatures found; showing churn instead
   map       http://127.0.0.1:53412/9f3c…/      Ctrl-C to stop
 ```
+
+The summary does not depend on `--jobs`: a contract test compares it for 1, 4, 11 and 64. `--timings` adds how long each line took and how many git processes read the history.
 
 ### 5.2 What the scan computes
 
@@ -170,10 +172,12 @@ fogline 0.1.0 · django @ f24f38c (main)
 
 **History.** All commits reachable from HEAD.
 
-- For each non-merge commit and each path it touches: `added` and `deleted`. With the old file O and the new file N split into lines, `deleted = |O| − LCS(O, N)` and `added = |N| − LCS(O, N)`, where LCS is their longest common subsequence of lines. This is what git reports with the minimal diff algorithm, and by definition it does not depend on the tool that computes it.
-- A rename, detected by git at 50% similarity, counts only the lines that changed inside the file. Copies are not detected.
+- For each non-merge commit and each path it touches: `added` and `deleted`. With the old file O and the new file N split into lines, `deleted = |O| − LCS(O, N)` and `added = |N| − LCS(O, N)`, where LCS is their longest common subsequence of lines. By definition this does not depend on the tool that computes it. Git 2.50 and newer report exactly this with the minimal diff algorithm, and a test computes it a second way, from both versions of each file. An older git first marks some lines as changed, as a shortcut, and can then report a few lines more on both sides; the scan says so (caveat `diff_not_minimal`). Git's own `xdiff/xprepare.c` skips the shortcut for the minimal diff at the v2.50.0 tag and not at v2.49.0, and the commit that changed it (03f2915541) found shorter diffs in about 1.3% of the diffs in git's own history.
+- A rename, detected by git at 50% similarity, counts only the lines that changed inside the file. Copies are not detected. In a commit where more than 1,000 files could pair up, git pairs only the ones that are exactly alike.
 - Merge commits carry no line statistics of their own.
-- Per file, summed over history: `commits`, `added`, `deleted`, `authors` (distinct author emails), `first_at`, `last_at`, and the agent and automation splits below. History before a rename is carried to the file's current path (SHOULD; if it is not done, a caveat says so).
+- A change to a submodule entry is left out, because the entry is not a file. A change to a symbolic link counts the one line git shows for it, the path it points to.
+- Per file, summed over history: `commits`, `added`, `deleted`, `authors` (distinct author emails, as the commits record them), `first_at` and `last_at` (the earliest and the latest author date), and the agent and automation splits below. History before a rename is carried to the file's current path (SHOULD; if it is not done, a caveat says so).
+- `.mailmap` is not applied. Git reads that file from the work tree, so an uncommitted edit to it would change the count of authors. Measured with git 2.52: a `.mailmap` that was never committed changed what `%aE` printed for six of ten commits.
 
 **Attribution** is per commit:
 
@@ -199,6 +203,7 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 | `shallow_clone` | This clone holds only part of the history. |
 | `lossy_paths` | Some paths are not valid UTF-8 and were converted. |
 | `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. |
+| `diff_not_minimal` | This git is older than 2.50, so for some changes it counts a few more added and deleted lines than the change needs. |
 | `history_off` | History was not read (`--history none`). |
 
 ### 5.3 How git is called
@@ -212,37 +217,50 @@ All repository access in Phase 1 goes through the `git` executable, version 2.25
 | HEAD | `git rev-parse --verify --quiet HEAD^{commit}` (exit 1 means no commits yet) and `git symbolic-ref --quiet --short HEAD` (exit 1 means HEAD is detached) |
 | Files and sizes | `git ls-tree -r -l -z <head>` |
 | Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> <head>`, with `GIT_ATTR_SOURCE=<head>` |
-| Commit metadata | `git log --topo-order -z --format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%aE%x1f%B HEAD` |
-| Commit order | `git rev-list --topo-order HEAD`, cut into K contiguous slices |
-| Line statistics | K workers, each `git diff-tree --stdin -r --root -M50% -l1000 --diff-algorithm=minimal --numstat -z --no-textconv --no-ext-diff`, fed one slice on stdin |
+| Commit metadata | `git log --topo-order -z --no-show-signature --format=%H%x1f%P%x1f%at%x1f%an%x1f%ae%x1f%B <head>` |
+| Commit order | The order `git log` printed. The commits that are not merges are cut into K runs of neighbours, as equal in length as they can be. |
+| Line statistics | K workers, each `git diff-tree --stdin --always -r --root -M50% -l1000 --diff-algorithm=minimal --numstat -z --no-textconv --no-ext-diff --ignore-submodules=all`, with `GIT_ATTR_SOURCE=<head>`, fed one run on stdin |
+| Missing objects, in a partial clone only | `git rev-list --objects --no-object-names --missing=print <head>`, with `--no-walk` before the files are listed and without it before history is read |
 
 Rules:
 
 - Every call sets `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, and passes `-c core.quotepath=false -c i18n.logOutputEncoding=UTF-8`. The flags above are explicit so the user's git configuration cannot change the numbers.
+- Every call also sets `GIT_ATTR_NOSYSTEM=1` and passes `-c core.attributesFile=/dev/null`, so the attributes files of the machine and of the user are not read. Measured with git 2.52 before this rule existed: one line, `*.py binary`, in `~/.config/git/attributes` turned the line counts of three more files of a seven-file repository into `-`. Git reads `/dev/null` as an empty file on Windows too: its `compat/mingw.c` maps that name.
+- `git log` gets `--no-show-signature`. With the setting `log.showSignature` on, git prints lines about a signed commit's signature into the output before the commit. Measured with git 2.52 and one commit signed with an SSH key: the line `No signature` appeared in front of the commit's id, and the record grew from 121 to 134 bytes.
 - Every call removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_NAMESPACE`. Each would make git read a repository other than the one the scan was pointed at, and git sets some of them itself while it runs hooks.
 - "Not a git repository" is recognised by that phrase in git's error message, which `LC_ALL=C` keeps in English. Any other failure is reported with git's own message and exit code 1.
 - `<head>` is the commit id that discovery read, never the name `HEAD`. Every command of a scan then reads the same commit, even if someone commits while it runs.
 - `<empty-tree>` is the id printed by `git hash-object -t tree --stdin` on empty input. That command computes the id without writing an object.
 - `.gitattributes` can declare a file binary, which removes its line count. Left alone, git reads that file from the work tree: an uncommitted edit changes the numbers, and a bare repository ignores the file. Measured with git 2.52: a text file marked `binary` shows `-` in a work tree and 2 lines in a bare clone of the same commit. `GIT_ATTR_SOURCE=<head>` makes git read it from the commit instead. Git has had that variable since 2.41.0: its own `git.c` knows `--attr-source` at the v2.41.0 tag and not at v2.40.0. An older git ignores the variable, and the scan then records the caveat `attributes_from_work_tree`.
 - Known limit: a repository's own `info/attributes` file still applies, on every git. Git has no switch to ignore it.
+- Known limit: when the commit's `.gitattributes` gives a file a diff driver by name (`*.dat diff=mine`), a user's setting `diff.mine.binary=true` still makes that file binary. Measured with git 2.52. The driver's other settings are covered: `--no-textconv`, `--no-ext-diff` and `--diff-algorithm` are given on the command line.
 - A partial clone, made with `git clone --filter`, leaves objects on its remote, and git downloads one whenever a command asks for it. That is a network request and a write into the repository, so the scan prevents it twice. Measured with git 2.52 before this rule existed: `ls-tree -r -l` in a blobless clone with no checkout downloaded three blobs and added three packs.
   - Every call sets `GIT_NO_LAZY_FETCH=1`. Git has honoured it since 2.45.0: its own `environment.h` names the variable at the v2.45.0 tag and not at v2.44.0.
-  - Discovery reads the configuration for a promisor remote (`git config -z --get-regexp` for `extensions.partialclone` and `remote.*.promisor`). In such a clone the scan first runs `git rev-list --objects --missing=print --no-walk <head>`, which lists missing objects instead of downloading them. Its code turns downloading off, and already did at v2.25.0, so this is safe on every supported git. If anything is missing, the scan stops with exit code 3 and says that it never downloads.
-  - A partial clone that has everything the commit needs is scanned as usual.
+  - Discovery reads the configuration for a promisor remote (`git config -z --get-regexp` for `extensions.partialclone` and `remote.*.promisor`). In such a clone the scan first runs `git rev-list --objects --no-object-names --missing=print --no-walk <head>`, which lists missing objects instead of downloading them. Its code turns downloading off, and already did at v2.25.0, so this is safe on every supported git. If anything is missing, the scan stops with exit code 3 and says that it never downloads.
+  - Counting the lines of history needs every version of every file, and the usual partial clone holds only the newest. So before history is read the same command runs without `--no-walk`, over every commit. Measured with git 2.52 in a clone made with `--filter=blob:none`: nothing missing for the commit, and three earlier versions missing for a ten-commit history. With `GIT_NO_LAZY_FETCH` unset, which is how a git older than 2.45 behaves, the workers downloaded them and added three packs. The scan stops with exit code 3 and names `--history none`, which scans the files alone.
+  - A partial clone that has everything the scan needs is scanned as usual.
 - No command that writes is ever used: no `status`, no `mktree`, nothing that refreshes the index.
 
 Output shapes, verified today by reading the raw bytes:
 
 | Token | Shape with `-z` |
 |---|---|
-| Commit id line from `diff-tree --stdin` | `<sha>` NUL |
+| Commit id line from `diff-tree --stdin` | `<sha>` NUL. With `--always`, a commit that changed nothing prints this line and nothing else. |
 | Normal record | `<added>` TAB `<deleted>` TAB `<path>` NUL |
 | Rename record | `<added>` TAB `<deleted>` TAB NUL `<old path>` NUL `<new path>` NUL |
 | Binary file | `-` for both counts |
-| Merge commit | no output at all |
+| Merge commit | never sent to `diff-tree`, so it has no records by construction |
 | Metadata record | fields separated by 0x1F, record ended by NUL; the message is the last field because it may contain 0x1F |
 
-Parallel runs are exact, not approximate. Measured on Django with the exact command above: the output of 11 workers, concatenated in slice order, equals the single-process output byte for byte (8.1 MB, 154,174 records, 2,398 of them renames).
+A path is never taken for a commit id, even one that looks like one: a path comes after two tabs, or right after a rename's numbers, where the next two tokens are read as paths whatever they hold.
+
+Every commit that is sent has to come back. `diff-tree --stdin` skips what it cannot use and still exits with 0. Measured with git 2.52 in one run: an id that names no object printed nothing, a last line without a line break was ignored, a line that is not an id was copied to the output, and git exited with 0. Without `--always` a commit that changed nothing prints nothing either, so a skipped commit could not be told from an empty one. With it, the parser checks that the ids in the output are exactly the ids that were sent, in that order, and anything else is an error.
+
+Parallel runs are exact, not approximate. Measured on Django with the exact command above: the output of 11 workers, joined in the order of the runs, equals the single-process output byte for byte (8,104,685 bytes, 154,174 records, 2,398 of them renames).
+
+The work is cut once, into K runs. A queue of smaller runs, handed to K processes at a time, would even out the load, and it was slower: 2.6 s with 35 runs and 3.0 s with 346, against 2.2 s with 11 (Django, 11 processes). A git process is fastest on commits that are neighbours, where it has just read most of what the next one needs.
+
+The K processes are started one after another. Starting a process needs several open files for a moment, and macOS gives a process 256 unless the user raised it. Measured: 64 processes started at the same time ran out of them, and started in turn they did not.
 
 ### 5.4 Agent signatures
 
@@ -455,7 +473,7 @@ The riskiest part goes first, while the binary is still trivial.
 |---|---|---|
 | 3.1 ✓ | Repository discovery, HEAD facts, exit codes 3 and 4 | Contract tests: not a repository, no commits, git missing, git too old (simulated by a script named `git`, so on Unix only) |
 | 3.2 ✓ | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
-| 3.3 | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
+| 3.3 ✓ | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
 | 3.4 | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every signature has a fixture commit; v1 at `f857867` gives 17 of 51 |
 | 3.5 | Carry history across renames to the current path (SHOULD); caveat registry | Rename case in fixture F3 |
 | 3.6 | Bundle writer, schema export, TypeScript types, drift check, `scan --out`, `--json`, `--timings` | Two scans give identical bytes in every file but `run.json` |
@@ -504,9 +522,9 @@ The riskiest part goes first, while the binary is still trivial.
 | Layer | What it covers |
 |---|---|
 | Unit | Parsers for `ls-tree`, numstat (rename records included) and log records; trailer extraction; signature matching; the file classifier; rename resolution |
-| Property (proptest) | Parsers never panic on arbitrary bytes; totals do not depend on the worker count or on where the slices are cut |
+| Seeded, in place of property tests | The parser of the workers' output reads its real input damaged in 20,000 fixed ways and never crashes; cutting the work loses no commit and keeps the order for every count of commits and of runs up to 40; the history is the same for 1 to 1,000 jobs. A fixed sequence of numbers makes a failure repeat. This avoids the proptest dependency; it comes back if these stop finding bugs. |
 | Contract (black box) | Runs the binary named by `FOGLINE_BIN` on each fixture and compares the bundle with a golden file. Also: exit codes, stdout and stderr discipline, determinism, and "the repository is byte-for-byte unchanged after a scan". |
-| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs |
+| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs; the line statistics against the definition in §5.2, computed from both versions of each changed file |
 | Viewer unit (Vitest) | Bundle decoding, hierarchy building, color scales, formatters |
 | Viewer end-to-end (Playwright, Chromium on Linux) | A fixture bundle served by the real binary: the ready event, cells drawn, tooltip, layer switch, caveats listed, no outside requests, one screenshot baseline |
 | Launcher (`node:test`) | Platform table, missing package message, exit code and signal pass-through |
@@ -522,6 +540,10 @@ Fixture repositories are built at test time by `fogline-testkit` with fixed date
 | F3 edges | Empty file, binary file, file with no final newline, CRLF file, non-ASCII path, path with spaces, deep nesting, symlink, submodule entry, deleted file, renamed file, renamed-and-edited file, lockfile, minified file, a file that is one very long line, vendored file, merge commit, empty commit |
 | F4 empty | A repository with no commits |
 | F5 shallow | A depth-1 clone of F1 |
+| Generated | About fifty commits made by a fixed sequence of numbers: lines that repeat, edits at random places, renames, deletions, binary files, a merge every seventh step. Built inside the history tests. |
+| Large file | One file of 3,000 lines, half of it rewritten: a change where git's default diff is longer than the minimal one, so a test notices if the minimal diff is ever dropped |
+
+The differential checks also run on any repository, for the ones too large to build in a test: `FOGLINE_HISTORY_REPO=<path> cargo test --release -p fogline-core --test history -- --ignored --nocapture`.
 
 Benchmark corpus, pinned by SHA in `bench/corpus.toml`. Counts measured today from commit messages with a subset of the seed rules, so read them as minimums:
 
@@ -674,6 +696,17 @@ Measured today on Django at `f24f38c6b2`: 7,102 files, 1,122,175 text lines, 1,3
 | For comparison, git's defaults without rename detection: 1, 5 and 11 processes | 11.1 s, 3.9 s, 2.2 s |
 | `git blame` on 200 Python files, one at a time | 33.4 s (167 ms per file) |
 | `git blame` on the same files, 10 at a time | 5.2 s |
+
+Measured again on 2026-11-19 with `fogline scan` itself: release build, git 2.52, 11 cores, median of five runs (three for `--jobs 4`, one for `--jobs 1`).
+
+| Command | Time |
+|---|---|
+| `fogline scan`, which here means 11 jobs | 2.7 s |
+| `fogline scan --jobs 4` | 4.4 s |
+| `fogline scan --jobs 1` | 14.3 s |
+| `fogline scan --history none` | 0.30 s |
+
+It reports 35,123 commits, 591 merges, 3,378,909 lines added and 2,253,367 deleted, in 154,174 changes to 11,797 paths, 2,398 of them renames. The history is the same for 1, 4 and 11 jobs, and it is what one `git log --numstat` process reports, commit for commit. The command at the end of §7 repeats that check and prints these counts.
 
 What the numbers say:
 

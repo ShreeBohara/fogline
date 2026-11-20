@@ -55,6 +55,10 @@ fn run(cli: Cli) -> Result<(), Failure> {
     match cli.command {
         Command::Version { json } => version::write(&mut io::stdout().lock(), json)
             .map_err(|err| Failure::new(EXIT_FAILURE, format!("could not write to stdout: {err}"))),
-        Command::Scan { path } => scan::run(&path),
+        Command::Scan {
+            path,
+            history,
+            jobs,
+        } => scan::run(&path, history, jobs.map(usize::from)),
     }
 }
