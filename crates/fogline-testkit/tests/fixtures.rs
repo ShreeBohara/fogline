@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use fogline_testkit::{Fixture, f1, f3, f4, f5};
+use fogline_testkit::{Fixture, f1, f2, f3, f4, f5};
 
 /// The lines of every file at HEAD, counted by reading each blob: one per
 /// line ending, plus one for a last line that has none. `None` for a blob
@@ -106,6 +106,57 @@ fn a_bare_clone_keeps_the_head_and_has_no_work_tree() {
     assert_eq!(bare.head(), Some(f1::HEAD));
     let is_bare = bare.git(["rev-parse", "--is-bare-repository"]).unwrap();
     assert_eq!(is_bare, "true");
+}
+
+#[test]
+fn f2_has_its_recorded_head() {
+    let fixture = f2::build().unwrap();
+    assert_eq!(
+        fixture.head(),
+        Some(f2::HEAD),
+        "F2 must have the same commit id on every machine and every git version"
+    );
+}
+
+#[test]
+fn f2_has_the_shape_its_recipe_describes() {
+    let fixture = f2::build().unwrap();
+    let commits = f2::commits();
+
+    let count = fixture.git(["rev-list", "--count", "HEAD"]).unwrap();
+    assert_eq!(count, commits.len().to_string());
+    let merges = fixture
+        .git(["rev-list", "--count", "--merges", "HEAD"])
+        .unwrap();
+    assert_eq!(merges, "1");
+
+    // Every commit is named by the first line of its message, once.
+    let subjects = fixture.git(["log", "--format=%s"]).unwrap();
+    let subjects: BTreeSet<&str> = subjects.lines().collect();
+    let names: BTreeSet<&str> = commits.iter().map(|entry| entry.name).collect();
+    assert_eq!(subjects, names);
+    assert_eq!(names.len(), commits.len());
+
+    // Each commit but the merge added one file, of as many lines as the
+    // table says.
+    let added: Vec<&f2::Entry> = commits.iter().filter(|entry| entry.added > 0).collect();
+    assert_eq!(added.len(), commits.len() - 1);
+    let paths: Vec<String> = added
+        .iter()
+        .map(|entry| format!("notes/{}.txt", entry.name))
+        .collect();
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let expected: Vec<Option<u64>> = added.iter().map(|entry| Some(entry.added)).collect();
+    assert_eq!(lines_by_reading(&fixture, &paths), expected);
+    let files = fixture
+        .git(["ls-tree", "-r", "--name-only", "HEAD"])
+        .unwrap();
+    assert_eq!(files.lines().count(), added.len());
+
+    // The bots are authors with the names GitHub gives its apps.
+    let authors = fixture.git(["log", "--format=%an"]).unwrap();
+    assert!(authors.lines().any(|name| name == "dependabot[bot]"));
+    assert!(authors.lines().any(|name| name == "claude[bot]"));
 }
 
 #[test]

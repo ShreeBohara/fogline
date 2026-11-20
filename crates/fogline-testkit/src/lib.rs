@@ -7,6 +7,7 @@
 //! loudly instead of quietly changing what other tests see.
 
 pub mod f1;
+pub mod f2;
 pub mod f3;
 pub mod f4;
 pub mod f5;
