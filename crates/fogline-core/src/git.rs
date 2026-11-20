@@ -123,10 +123,11 @@ const REDIRECTING_VARIABLES: [&str; 8] = [
 ///   messages arrive as raw UTF-8 bytes.
 /// - `GIT_NO_LAZY_FETCH=1`: in a partial clone, fail instead of downloading
 ///   an object that is missing. A download is a network request and a write
-///   into the repository, and the engine may do neither. Git has understood
-///   this since 2.45.0 (its `environment.h` names it at the v2.45.0 tag and
-///   not at v2.44.0), so the engine also looks before it reads
-///   (`Repository::missing_objects`).
+///   into the repository, and the engine may do neither. Not every git the
+///   engine supports knows the variable: 2.45.0 and newer do (its
+///   `environment.h` names it at the v2.45.0 tag and not at v2.44.0), and so
+///   do six maintenance releases of older lines, from 2.39.4 to 2.44.1. So
+///   the engine also looks before it reads (`Repository::missing_objects`).
 /// - `GIT_ATTR_NOSYSTEM=1`, `core.attributesFile=/dev/null`: ignore the
 ///   attributes files of the machine and of the user. An attributes file
 ///   can declare a file binary, which removes its line counts, so a line

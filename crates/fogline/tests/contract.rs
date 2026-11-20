@@ -200,7 +200,54 @@ fn scan_counts_the_files_and_lines_of_a_plain_repository() {
         )
     );
     // Three lines and no more: nothing about this repository needs a note.
-    assert_eq!(run.stderr.lines().count(), 3, "{run:?}");
+    // An old git adds notes about itself, and the next test is about those.
+    let about_git = notes_about_git(&run).len();
+    assert_eq!(run.stderr.lines().count() - about_git, 3, "{run:?}");
+}
+
+/// The notes of a summary that are about the git that ran. They depend on
+/// the machine, not on the repository.
+fn notes_about_git(run: &Outcome) -> Vec<&str> {
+    run.stderr
+        .lines()
+        .filter(|line| line.starts_with("  note      git "))
+        .collect()
+}
+
+/// The git that the binary found, as its major and minor number.
+fn git_in_use() -> (u32, u32) {
+    let run = fogline(["version", "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&run.stdout).expect("stdout is JSON");
+    let version = report["git"].as_str().expect("the version of git");
+    let mut numbers = version.split('.').map(str::parse::<u32>);
+    match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor),
+        _ => panic!("not a version of git: {version:?}"),
+    }
+}
+
+#[test]
+fn scan_notes_what_an_old_git_cannot_do() {
+    let fixture = f1::build().unwrap();
+    let run = scan(&fixture.path());
+    assert_scanned(&run, F1_SHORT);
+
+    // Spec section 5.2: before 2.41 git cannot read `.gitattributes` from
+    // the commit, and before 2.50 its minimal diff is not always the
+    // smallest one. A newer git gets neither note.
+    let git = git_in_use();
+    let mut expected = Vec::new();
+    if git < (2, 41) {
+        expected.push("reads .gitattributes from the work tree");
+    }
+    if git < (2, 50) {
+        expected.push("can count a few more added and deleted lines");
+    }
+    let notes = notes_about_git(&run);
+    assert_eq!(notes.len(), expected.len(), "{run:?}");
+    for (note, says) in notes.iter().zip(expected) {
+        assert!(note.contains(says), "expected {says:?} in {note:?}");
+    }
 }
 
 #[test]
