@@ -108,14 +108,6 @@ fn summary(found: &Repository, files: &Files, history: Option<&History>) -> Stri
             Version::ATTRIBUTES_FROM_COMMIT,
         ));
     }
-    if history.is_some() && found.git < Version::EXACT_MINIMAL_DIFF {
-        text.push_str(&format!(
-            "  note      git {} can count a few more added and deleted lines than a change \
-             needs; git {} or newer counts the fewest\n",
-            found.git,
-            Version::EXACT_MINIMAL_DIFF,
-        ));
-    }
     text
 }
 
@@ -323,7 +315,8 @@ mod tests {
             object_format: ObjectFormat::Sha1,
             head: "822e3536cbae5f3404efab40519ba1de1102e6a0".to_owned(),
             branch: Some("main".to_owned()),
-            git: Version::EXACT_MINIMAL_DIFF,
+            // A git that needs no note about itself.
+            git: Version::ATTRIBUTES_FROM_COMMIT,
             partial_clone: false,
         }
     }
@@ -625,26 +618,17 @@ mod tests {
         );
     }
 
-    /// Git older than 2.50 does not always find the smallest diff. That
-    /// only matters to a scan that read history.
+    /// Git's default diff, which counts the lines of history, counts the
+    /// same on every git the engine supports (spec section 5.2). So reading
+    /// history adds no note about the git, however old it is.
     #[test]
-    fn a_summary_says_when_git_may_count_more_lines_than_needed() {
+    fn reading_history_adds_no_note_about_an_old_git() {
         let files = files(vec![]);
         let history = history(vec![commit(0, 1, 0)]);
-        let note = "  note      git 2.49.1 can count a few more added and deleted lines than a \
-                    change needs; git 2.50.0 or newer counts the fewest\n";
-
         let mut found = repository();
-        found.git = Version {
-            major: 2,
-            minor: 49,
-            patch: 1,
-        };
-        assert!(summary(&found, &files, Some(&history)).ends_with(note));
-        assert!(!summary(&found, &files, None).contains("fewest"));
-
-        found.git = Version::EXACT_MINIMAL_DIFF;
-        assert!(!summary(&found, &files, Some(&history)).contains("fewest"));
+        found.git = Version::MINIMUM;
+        let text = summary(&found, &files, Some(&history));
+        assert!(!text.contains("  note      "), "{text}");
     }
 
     /// A path that had to be converted is reported once, whether it was

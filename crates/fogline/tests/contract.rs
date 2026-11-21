@@ -299,15 +299,13 @@ fn scan_notes_what_an_old_git_cannot_do() {
     assert_scanned(&run, F1_SHORT);
 
     // Spec section 5.2: before 2.41 git cannot read `.gitattributes` from
-    // the commit, and before 2.50 its minimal diff is not always the
-    // smallest one. A newer git gets neither note.
+    // the commit. That is the only note about an old git. Reading history
+    // adds none, because git's default diff counts the same on every git
+    // from 2.25 on. A newer git gets no note.
     let git = git_in_use();
     let mut expected = Vec::new();
     if git < (2, 41) {
         expected.push("reads .gitattributes from the work tree");
-    }
-    if git < (2, 50) {
-        expected.push("can count a few more added and deleted lines");
     }
     let notes = notes_about_git(&run);
     assert_eq!(notes.len(), expected.len(), "{run:?}");
