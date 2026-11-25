@@ -122,6 +122,10 @@ const REDIRECTING_VARIABLES: [&str; 8] = [
 ///   such as `*.py binary` in `~/.config/git/attributes` would change the
 ///   numbers. Git reads `/dev/null` as an empty file on every platform,
 ///   Windows included.
+/// - `core.bigFileThreshold=512m`: git counts a file larger than this as
+///   binary, without its lines. 512 MiB is git's own default, so the pin
+///   changes nothing unless the user's configuration sets a smaller value,
+///   which would otherwise change the numbers.
 /// - The variables in [`REDIRECTING_VARIABLES`] are removed, so the folder
 ///   git runs in is the only thing that decides which repository it reads.
 ///
@@ -140,6 +144,7 @@ pub fn command() -> Command {
         .args(["-c", "core.quotepath=false"])
         .args(["-c", "i18n.logOutputEncoding=UTF-8"])
         .args(["-c", "core.attributesFile=/dev/null"])
+        .args(["-c", "core.bigFileThreshold=512m"])
         .stdin(Stdio::null());
     command
 }
@@ -339,7 +344,9 @@ mod tests {
                 "-c",
                 "i18n.logOutputEncoding=UTF-8",
                 "-c",
-                "core.attributesFile=/dev/null"
+                "core.attributesFile=/dev/null",
+                "-c",
+                "core.bigFileThreshold=512m"
             ]
         );
     }

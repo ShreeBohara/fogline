@@ -420,6 +420,34 @@ fn scan_ignores_the_attributes_file_of_the_user() {
     assert_eq!(run.stderr, plain.stderr);
 }
 
+/// Git counts a file larger than `core.bigFileThreshold` as binary, without
+/// its lines. The user's own value must not reach a scan either.
+#[test]
+fn scan_ignores_the_big_file_threshold_of_the_user() {
+    let fixture = f3::build().unwrap();
+    let plain = scan(&fixture.path());
+    assert_scanned(&plain, F3_SHORT);
+
+    // Every supported git reads `$HOME/.gitconfig`. Git 2.32 and newer read
+    // the file named by `GIT_CONFIG_GLOBAL` instead when it is set (git's
+    // `config.c` has the variable at the v2.32.0 tag and not at v2.31.0), so
+    // it is removed. A threshold of one byte makes every longer file "big".
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".gitconfig"),
+        "[core]\n\tbigFileThreshold = 1\n",
+    )
+    .unwrap();
+    let mut command = fogline_command([OsStr::new("scan"), fixture.path().as_os_str()]);
+    command
+        .env("HOME", home.path())
+        .env_remove("GIT_CONFIG_GLOBAL");
+    let run = run(command);
+
+    assert_scanned(&run, F3_SHORT);
+    assert_eq!(run.stderr, plain.stderr);
+}
+
 /// Rule 1 of the product: a scan never writes into the repository it reads.
 /// Every file under the fixture, its `.git` folder included, has to be the
 /// same byte for byte afterwards, and nothing may appear or disappear.
