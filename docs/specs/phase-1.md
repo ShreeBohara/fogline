@@ -34,8 +34,8 @@ Rows marked ⟲ change something the plan said.
 | D1 ⟲ | Build in a **new public repository**. Leave `codebaseqa` untouched apart from tags and a notice. | v1 has a working public demo and a coherent README, and nothing needs deleting. A new product under a new name gets a clean history. Public from the first commit, because the five-runner build matrix is free without limits only for public repositories and npm generates provenance only for public source. |
 | D2 ⟲ | Keep every checkout **outside iCloud**. | An iCloud-synced checkout of v1 lost most of its `.git` directory to eviction, including the index file ([ADR-0001](../adr/0001-repository-name-versions-conventions.md)). |
 | D3 ⟲ | Packages start at **0.1.0**. The launch release is **1.0.0**. | The redesign was first planned as "CodebaseQA 2.0". A new package whose first stable version is 2.0.0 confuses people, and 0.x tells users the format can still change. |
-| D4 | The engine reads history through **git's own plumbing commands**, run in parallel. gitoxide is a timeboxed experiment. | Measured: 11 parallel `git diff-tree` processes produce Django's full line statistics in 2.1 s, byte for byte identical to one process that takes 12.6 s (§11). |
-| D5 | Line statistics use the **minimal diff** with **rename detection**. | Measured on Django: git's default heuristic and the minimal diff differ by 47,941 lines (1.3%), so the algorithm has to be pinned. Without rename detection, added lines are inflated by 7.7%. |
+| D4 | The engine reads history through **git's own plumbing commands**, run in parallel. gitoxide is a timeboxed experiment. | Measured: 11 parallel `git diff-tree` processes produce Django's full line statistics in 2.3 s, byte for byte identical to one process that takes 12.4 s (§11). |
+| D5 | Line statistics use **git's default diff**, asked for by name, with **rename detection**. | The first choice was the smallest possible diff, and nothing bounds the time git needs for it. Measured on codegraph: one commit that regenerates a parser file of a million lines took it 227 s, and takes the default diff 1.1 s (§11). The default counts 1.4% more added lines over Django's history than the smallest diffs, it is what `git log --numstat` prints, and every git from 2.25 on counts the same (§5.2). Without rename detection, added lines are inflated by 7.7%. |
 | D6 ⟲ | Say **"agent-attributed"**. Commit counts are a lower bound; line shares are estimates that can err both ways. | A signed commit can contain hand-written lines, and an unsigned one can be agent-written. An earlier draft of the plan called the line share "a lower bound". That was wrong. |
 | D7 ⟲ | Ship through npm as a small launcher plus **one package per platform**, built on native runners by a hand-written release workflow. Revisit cargo-dist in Phase 3. | Verified: Biome ships this way. All five targets have native GitHub-hosted runners, so nothing is cross-compiled. cargo-dist's npm installer fetches the binary after install and authenticates with a stored token. |
 | D8 | The scan **writes nothing** unless `--out` is given, and never inside the scanned repository. | Design rule 7 in the plan. Results are served from memory. |
@@ -150,7 +150,7 @@ Illustrative output of `fogline` on a large repository with no agent signatures:
 ```
 fogline 0.1.0 · django @ f24f38c (main)
   files     7,102 (1,122,175 lines, 1,379 binary)
-  history   35,123 commits (591 merges), 3,378,909 lines added, 2,253,367 deleted
+  history   35,123 commits (591 merges), 3,426,961 lines added, 2,301,419 deleted
   agents    no agent signatures found; showing churn instead
   map       http://127.0.0.1:53412/9f3c…/      Ctrl-C to stop
 ```
@@ -160,7 +160,7 @@ What `fogline scan` prints today for a repository with agent signatures, Codebas
 ```
 fogline 0.0.1 · codebaseqa @ f857867 (detached)
   files     244 (53,352 lines, 14 binary)
-  history   51 commits, 60,193 lines added, 6,841 deleted
+  history   51 commits, 60,356 lines added, 7,004 deleted
   agents    at least 17 agent-attributed commits out of 51 (Claude Code 17), with an estimated 14% of added lines
 ```
 
@@ -183,8 +183,11 @@ The summary does not depend on `--jobs`: a contract test compares it for 1, 4, 1
 
 **History.** All commits reachable from HEAD.
 
-- For each non-merge commit and each path it touches: `added` and `deleted`. With the old file O and the new file N split into lines, `deleted = |O| − LCS(O, N)` and `added = |N| − LCS(O, N)`, where LCS is their longest common subsequence of lines. By definition this does not depend on the tool that computes it. Git 2.50 and newer report exactly this with the minimal diff algorithm, and a test computes it a second way, from both versions of each file. An older git first marks some lines as changed, as a shortcut, and can then report a few lines more on both sides; the scan says so (caveat `diff_not_minimal`). Git's own `xdiff/xprepare.c` skips the shortcut for the minimal diff at the v2.50.0 tag and not at v2.49.0, and the commit that changed it (03f2915541) found shorter diffs in about 1.3% of the diffs in git's own history.
-- A rename, detected by git at 50% similarity, counts only the lines that changed inside the file. Copies are not detected. In a commit where more than 1,000 files could pair up, git pairs only the ones that are exactly alike.
+- For each non-merge commit and each path it touches: `added` and `deleted`, the lines that git's default diff marks as added and as deleted. They are the numbers `git log --numstat` prints. Measured with git 2.52: a plain `git log --numstat`, with no option and no setting of its own, sums to the scan's totals on Django and on codegraph.
+- These counts can be above the smallest possible ones. With the old file O and the new file N split into lines, no diff has fewer than `|N| − LCS(O, N)` added and `|O| − LCS(O, N)` deleted lines, where LCS is their longest common subsequence of lines. Git's default diff looks for that smallest diff and gives up where the search gets expensive: it first sets aside lines that repeat often, and it stops a search that has cost too much. Both limits are counts of work done and never a clock, so a slow machine and a fast one get the same numbers. What git counts above the smallest, it counts on both sides alike, because every diff has `added − deleted = |N| − |O|`. Measured on Django with git 2.52: 48,052 lines more on each side than the smallest diffs, which is 1.4% of the added lines, in 920 of the 34,532 commits that are not merges (§11). A test works the smallest change out from both versions of each changed file: on the fixtures git's count is that smallest change to the line, and on one large file, made to show the difference, it is 8 lines above (§7).
+- The smallest diff, which git computes with `--diff-algorithm=minimal`, is not used, because nothing bounds the time it takes. The scan asked for it until 2026-11-20. A scan of codegraph at `69bbb38978` then took 261 s, and takes 2.5 s now: four of its commits regenerate parser files of 200,000 to 1,200,000 lines, and the slowest of them alone took the minimal diff 227 s and takes the default 1.1 s (§11). Counting only the files above some size with the default diff would not bound the time either, because the time grows with the square of what changed and not with the size alone. Measured with git 2.52: a file of 1 MiB whose 131,072 lines are put in the opposite order takes the minimal diff 26 s and the default 0.3 s, and half that file takes the minimal diff 6.7 s (`seq -f '%07.0f' 1 131072 > old.txt; sort -r old.txt > new.txt; git diff --no-index --numstat --diff-algorithm=minimal old.txt new.txt`).
+- The counts do not depend on which git counts them. Measured on 2026-11-20: git 2.25.1, 2.52.0 and 2.56.1 print the same bytes for the whole of codegraph's history, and the same numbers for every change of Django's, apart from three renames in one commit (next point). Read in git's source: between the v2.25.0 and v2.56.1 tags the code of the default diff was rearranged and not changed. `xdl_recs_cmp` and `xdl_split` in `xdiff/xdiffi.c`, and `xdl_cleanup_records` and `xdl_clean_mmatch` in `xdiff/xprepare.c`, take the same decisions, and the limits they use (`XDL_MAX_COST_MIN`, `XDL_HEUR_MIN_COST`, `XDL_SNAKE_CNT`, `XDL_K_HEUR`, `XDL_KPDIS_RUN`, `XDL_MAX_EQLIMIT`, `XDL_SIMSCAN_WINDOW`) have the same values. Since 2.52 a line is hashed another way, which only decides where git looks the line up: lines are still matched by their content. The minimal diff is the one that changed. Since git 2.50 (commit 03f2915541) it no longer sets repeated lines aside, and on Django git 2.25.1 counts 4,387 lines more with it than git 2.52.0 does, in 817 commits. The scan had a caveat for that, `diff_not_minimal`, which went away with the minimal diff.
+- A rename, detected by git at 50% similarity, counts only the lines that changed inside the file. Copies are not detected. In a commit where more than 1,000 files could pair up, git pairs only the ones that are exactly alike. Which files git pairs can depend on the git. Before 2.43.2 it left out the last line of a file that does not end with a line break when it measured how alike two files are (git commit 1c5bc6971e, in the v2.43.2 tag and not in v2.43.1). Measured: in Django's commit `fad4a93275` git 2.25.1 does not pair three files of 3 and 4 lines that git 2.52.0 pairs, and so counts 7 added and 7 deleted lines more for that commit. No other commit of Django or of codegraph is counted differently. A scan does not say this yet.
 - Merge commits carry no line statistics of their own.
 - A change to a submodule entry is left out, because the entry is not a file. A change to a symbolic link counts the one line git shows for it, the path it points to.
 - Per file, summed over history: `commits`, `added`, `deleted`, `authors` (distinct author emails, as the commits record them), `first_at` and `last_at` (the earliest and the latest author date), and the agent and automation splits below. History before a rename is carried to the file's current path (SHOULD; if it is not done, a caveat says so).
@@ -216,7 +219,6 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 | `shallow_clone` | This clone holds only part of the history. |
 | `lossy_paths` | Some paths are not valid UTF-8 and were converted. |
 | `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. |
-| `diff_not_minimal` | This git is older than 2.50, so for some changes it counts a few more added and deleted lines than the change needs. |
 | `history_off` | History was not read (`--history none`). |
 
 ### 5.3 How git is called
@@ -232,7 +234,7 @@ All repository access in Phase 1 goes through the `git` executable, version 2.25
 | Line counts | `git diff --numstat -z --no-renames --no-textconv --no-ext-diff <empty-tree> <head>`, with `GIT_ATTR_SOURCE=<head>` |
 | Commit metadata | `git log --topo-order -z --no-show-signature --format=%H%x00%P%x00%at%x00%an%x00%ae%x00%B <head>` |
 | Commit order | The order `git log` printed. The commits that are not merges are cut into K runs of neighbours, as equal in length as they can be. |
-| Line statistics | K workers, each `git diff-tree --stdin --always -r --root -M50% -l1000 --diff-algorithm=minimal --numstat -z --no-textconv --no-ext-diff --ignore-submodules=all`, with `GIT_ATTR_SOURCE=<head>`, fed one run on stdin |
+| Line statistics | K workers, each `git diff-tree --stdin --always -r --root -M50% -l1000 --diff-algorithm=myers --numstat -z --no-textconv --no-ext-diff --ignore-submodules=all`, with `GIT_ATTR_SOURCE=<head>`, fed one run on stdin |
 | Missing objects, in a partial clone only | `git rev-list --objects --no-object-names --missing=print <head>`, with `--no-walk` before the files are listed and without it before history is read |
 
 Rules:
@@ -246,7 +248,7 @@ Rules:
 - `<empty-tree>` is the id printed by `git hash-object -t tree --stdin` on empty input. That command computes the id without writing an object.
 - `.gitattributes` can declare a file binary, which removes its line count. Left alone, git reads that file from the work tree: an uncommitted edit changes the numbers, and a bare repository ignores the file. Measured with git 2.52: a text file marked `binary` shows `-` in a work tree and 2 lines in a bare clone of the same commit. `GIT_ATTR_SOURCE=<head>` makes git read it from the commit instead. Git has had that variable since 2.41.0: its own `git.c` knows `--attr-source` at the v2.41.0 tag and not at v2.40.0. An older git ignores the variable, and the scan then records the caveat `attributes_from_work_tree`.
 - Known limit: a repository's own `info/attributes` file still applies, on every git. Git has no switch to ignore it.
-- Known limit: when the commit's `.gitattributes` gives a file a diff driver by name (`*.dat diff=mine`), a user's setting `diff.mine.binary=true` still makes that file binary. Measured with git 2.52. The driver's other settings are covered: `--no-textconv`, `--no-ext-diff` and `--diff-algorithm` are given on the command line.
+- Known limit: when the commit's `.gitattributes` gives a file a diff driver by name (`*.dat diff=mine`), a user's setting `diff.mine.binary=true` still makes that file binary. Measured with git 2.52. The driver's other settings are covered: `--no-textconv`, `--no-ext-diff` and `--diff-algorithm` are given on the command line. The last one is needed although `myers` is the name of git's default. Measured with git 2.52: with `*.txt diff=mine` in `.gitattributes` and a user's setting `diff.mine.algorithm=minimal`, which git has had since 2.40.0, a plain `git diff-tree --numstat` counted 1,172 added lines for a change that it counts as 1,174 without the setting, and as 1,174 again with `--diff-algorithm=myers`. The setting `diff.algorithm` is another matter: `git log` and `git diff` read it, and `git diff-tree` does not. Measured on the same change: `-c diff.algorithm=minimal` made `git log --numstat` count 1,172 and left `git diff-tree --numstat` at 1,174. No test of the numbers notices when the option is missing, because nothing sets a driver there, so a unit test checks that the command has it.
 - A partial clone, made with `git clone --filter`, leaves objects on its remote, and git downloads one whenever a command asks for it. That is a network request and a write into the repository, so the scan prevents it twice. Measured with git 2.52 before this rule existed: `ls-tree -r -l` in a blobless clone with no checkout downloaded three blobs and added three packs.
   - Every call sets `GIT_NO_LAZY_FETCH=1`. Git has honoured it since 2.45.0: its own `environment.h` names the variable at the v2.45.0 tag and not at v2.44.0. Six maintenance releases of older lines honour it too: git's `promisor-remote.c` reads the variable at the v2.39.4, v2.40.2, v2.41.1, v2.42.2, v2.43.4 and v2.44.1 tags, and not at the release before each. A git without it, such as 2.25.1, ignores the variable, so the scan does not rely on it.
   - Discovery reads the configuration for a promisor remote (`git config -z --get-regexp` for `extensions.partialclone` and `remote.*.promisor`). In such a clone the scan first runs `git rev-list --objects --no-object-names --missing=print --no-walk <head>`, which lists missing objects instead of downloading them. Its code turns downloading off, and already did at v2.25.0, so this is safe on every supported git. If anything is missing, the scan stops with exit code 3 and says that it never downloads.
@@ -271,7 +273,7 @@ NUL ends every field of the metadata because it is the one byte no field can hol
 
 Every commit that is sent has to come back. `diff-tree --stdin` skips what it cannot use and still exits with 0. Measured with git 2.52 in one run: an id that names no object printed nothing, a last line without a line break was ignored, a line that is not an id was copied to the output, and git exited with 0. Without `--always` a commit that changed nothing prints nothing either, so a skipped commit could not be told from an empty one. With it, the parser checks that the ids in the output are exactly the ids that were sent, in that order, and anything else is an error.
 
-Parallel runs are exact, not approximate. Measured on Django with the exact command above: the output of 11 workers, joined in the order of the runs, equals the single-process output byte for byte (8,104,685 bytes, 154,174 records, 2,398 of them renames).
+Parallel runs are exact, not approximate. Measured on Django with the exact command above: the output of 11 workers, joined in the order of the runs, equals the single-process output byte for byte (8,104,752 bytes, 154,174 records, 2,398 of them renames).
 
 The work is cut once, into K runs. A queue of smaller runs, handed to K processes at a time, would even out the load, and it was slower: 2.6 s with 35 runs and 3.0 s with 346, against 2.2 s with 11 (Django, 11 processes). A git process is fastest on commits that are neighbours, where it has just read most of what the next one needs.
 
@@ -372,7 +374,7 @@ Known limits:
     "shallow": false,
     "submodules_skipped": 0
   },
-  "options": { "history": "all", "diff": "minimal", "renames": "M50" },
+  "options": { "history": "all", "diff": "myers", "renames": "M50" },
   "totals": {
     "files": 412, "binary_files": 9, "lines": 58211,
     "commits": 1853, "merge_commits": 40,
@@ -569,7 +571,7 @@ The riskiest part goes first, while the binary is still trivial.
 | Unit | Parsers for `ls-tree`, numstat (rename records included) and log records; trailer extraction; signature matching; the file classifier; rename resolution |
 | Seeded, in place of property tests | The parser of the workers' output reads its real input damaged in 20,000 fixed ways and never crashes; cutting the work loses no commit and keeps the order for every count of commits and of runs up to 40; the history is the same for 1 to 1,000 jobs. A fixed sequence of numbers makes a failure repeat. This avoids the proptest dependency; it comes back if these stop finding bugs. |
 | Contract (black box) | Runs the binary named by `FOGLINE_BIN` on each fixture and compares the bundle with a golden file. Also: exit codes, stdout and stderr discipline, determinism, and "the repository is byte-for-byte unchanged after a scan". |
-| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs; the line statistics against the definition in §5.2, computed from both versions of each changed file |
+| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs; the line statistics against the smallest possible change, computed from both versions of each changed file: git may count more, by the same number of lines on both sides (§5.2), and on the fixtures it counts not one more, except on the large file |
 | Viewer unit (Vitest) | Bundle decoding, hierarchy building, color scales, formatters |
 | Viewer end-to-end (Playwright, Chromium on Linux) | A fixture bundle served by the real binary: the ready event, cells drawn, tooltip, layer switch, caveats listed, no outside requests, one screenshot baseline |
 | Launcher (`node:test`) | Platform table, missing package message, exit code and signal pass-through |
@@ -586,7 +588,7 @@ Fixture repositories are built at test time by `fogline-testkit` with fixed date
 | F4 empty | A repository with no commits |
 | F5 shallow | A depth-1 clone of F1 |
 | Generated | About fifty commits made by a fixed sequence of numbers: lines that repeat, edits at random places, renames, deletions, binary files, a merge every seventh step. Built inside the history tests. |
-| Large file | One file of 3,000 lines, half of it rewritten: a change where git's default diff is longer than the minimal one, so a test notices if the minimal diff is ever dropped |
+| Large file | One file of 3,000 lines, half of it rewritten: a change that git's default diff counts as 1,151 added and 1,464 deleted lines, 8 more on each side than the smallest possible change. A test records those numbers, so it notices if the engine ever asks git for another diff, and if a git ever counts this change differently. |
 
 The differential checks also run on any repository, for the ones too large to build in a test: `FOGLINE_HISTORY_REPO=<path> cargo test --release -p fogline-core --test history -- --ignored --nocapture`.
 
@@ -618,7 +620,7 @@ The same command as for the differential checks prints these numbers for a clone
 | `deny` | Linux | cargo-deny: advisories, licences, and a ban on HTTP client crates in the engine |
 | `workflows` | Linux | zizmor and actionlint on the workflows |
 
-`rust-old-git` is there because some of what §5.2 and §5.3 describe depends on git's version, and every other job has a current git. Git 2.25 ignores `GIT_ATTR_SOURCE`, so the scan records the caveat `attributes_from_work_tree`. It also ignores `GIT_NO_LAZY_FETCH`, so the scan's own search for missing objects is the only thing that keeps a scan of a partial clone from downloading. And its minimal diff is not always the smallest one, so the scan records `diff_not_minimal`. None of the histories that the tests read has a change that git 2.25 counts differently, so for this third case the job shows that the scan says so, and cannot yet show a count that differs.
+`rust-old-git` is there because some of what §5.2 and §5.3 describe depends on git's version, and every other job has a current git. Git 2.25 ignores `GIT_ATTR_SOURCE`, so the scan records the caveat `attributes_from_work_tree`. It also ignores `GIT_NO_LAZY_FETCH`, so the scan's own search for missing objects is the only thing that keeps a scan of a partial clone from downloading. The lines of a change are not such a case: git's default diff counts them the same on every git from 2.25 on (§5.2), and the history tests expect the same numbers in this job as in every other, the large rewrite of §7 included. Which files git pairs as a rename can still depend on the git (§5.2). The job does not show that, because no test expects a pairing that only one of the two gits makes.
 
 The job installs one exact build of git: the package `1:2.25.1-1ubuntu3`, which is the build Ubuntu 20.04 was released with. The newest build of that package, `1:2.25.1-1ubuntu3.14`, also calls itself 2.25.1, but a security update gave it `GIT_NO_LAZY_FETCH`. With that build a partial clone behaves as it does on a current git, and the job would pass without testing the download case. A version number does not say everything about a git that a distribution has patched. The released build still has the security bugs that the updates fixed, so the job checks the repository out before it installs git: the files arrive through GitHub's API, and the old git only ever reads the repositories that the tests build.
 
@@ -658,7 +660,7 @@ Facts this section relies on, checked today:
 | An install with only the launcher and one platform tarball succeeds while the other four platform packages do not exist on the registry: npm treats an optional dependency it cannot find as skipped. | `node scripts/pack-smoke.mjs target/release/fogline`, run on 2026-11-15 with npm 11.20.0 |
 | In a clone made with `git clone --filter=blob:none --no-checkout`, `GIT_NO_LAZY_FETCH=1 git ls-tree -r -l HEAD` downloads every missing file with Ubuntu 20.04's git package at `1:2.25.1-1ubuntu3`. At `1:2.25.1-1ubuntu3.14` it downloads nothing and warns "lazy fetching disabled". `git rev-list --objects --missing=print --no-walk HEAD` downloads with neither. | Run on 2026-11-19 in the `ubuntu:20.04` image |
 | With the search for missing objects taken out of the code that lists the files, listing such a clone of fixture F1 succeeds on the first of those builds: git has downloaded all six files. On the second it fails without a download, because `git ls-tree` prints `BAD` where a size belongs. With the search in place, the tests pass on both. | The tests, run on 2026-11-19 in the `ubuntu:20.04` image with each build |
-| With the test that compares the counts with the definition in §5.2 made to expect the exact numbers from every git, the history tests still pass on git 2.25.1: in every history they read, its minimal diff is already the smallest one. | `cargo test -p fogline-core --test history` with `exact` set to true, run on 2026-11-19 in the `ubuntu:20.04` image with the first of those builds |
+| The history tests expect the same counts from every git, to the line, and pass on git 2.25.1. That includes the large rewrite of §7: 1,151 added and 1,464 deleted lines there, as on git 2.52. | `cargo test -p fogline-core --test history`, run on 2026-11-20 in the `ubuntu:20.04` image with the first of those builds |
 
 ---
 
@@ -718,7 +720,7 @@ Facts this section relies on, checked today:
 
 | Experiment | Method | Baseline to beat | Timebox |
 |---|---|---|---|
-| E1 gitoxide history | Implement the same statistics with `gix` 0.90 (`blob-diff` feature, `line_counts`). Output must equal the reference on the fixtures with renames off. Time it on Django. | 2.1 s (11 git processes, the pinned command) | 6 h |
+| E1 gitoxide history | Implement the same statistics with `gix` 0.90 (`blob-diff` feature, `line_counts`). Output must equal the reference on the fixtures with renames off, where git's default diff is the smallest one (§7); the large file is left out, because another implementation need not give up its search where git does. Time it on Django. | 2.3 s (11 git processes, the pinned command) | 6 h |
 | E2 blame | `gix-blame` 0.20 against `git blame --porcelain` on the same 200 Django files: per-line agreement and wall time | 33.4 s sequential; 5.2 s with 10 processes | 3 h |
 | E3 startup | `fogline version` against `node -e 0`, 50 runs each, median and 95th percentile | — | 1 h |
 
@@ -746,30 +748,59 @@ Measured today on Django at `f24f38c6b2`: 7,102 files, 1,122,175 text lines, 1,3
 | List the tree with sizes | 0.06 s |
 | Line counts for every file | 0.21 s |
 | Commit metadata, no diffs | 0.23 s |
-| Line statistics with the pinned command (§5.3), one process | 12.6 s |
-| Line statistics with the pinned command, 11 processes | 2.1 s |
+| Line statistics with the pinned command (§5.3), one process | 12.4 s |
+| Line statistics with the pinned command, 11 processes | 2.3 s |
 | For comparison, git's defaults without rename detection: 1, 5 and 11 processes | 11.1 s, 3.9 s, 2.2 s |
 | `git blame` on 200 Python files, one at a time | 33.4 s (167 ms per file) |
 | `git blame` on the same files, 10 at a time | 5.2 s |
 
-Measured again on 2026-11-19 with `fogline scan` itself, after task 3.4, so with attribution: release build, git 2.52, 11 cores, median of five runs (three for `--jobs 4`, one for `--jobs 1`). The machine was not idle. A first measurement the same day, after task 3.3 and on a busier machine, gave 2.7 s, 4.4 s, 14.3 s and 0.30 s.
+The two rows about the pinned command were measured again on 2026-11-20, when the command changed from the minimal diff to git's default (§5.2). The command of §5.3, with its environment, read `git rev-list --no-merges --topo-order <head>`, whole for one process and cut by `split -l 3140` into 11 runs of neighbours for 11, and wrote to `/dev/null`: the median of three runs and of five, on a machine that was not idle. On 2026-11-15, with the minimal diff and before the command had `GIT_ATTR_SOURCE`, the two rows were 12.6 s and 2.1 s.
 
-| Command | Time |
-|---|---|
-| `fogline scan`, which here means 11 jobs | 2.5 s |
-| `fogline scan --jobs 4` | 4.2 s |
-| `fogline scan --jobs 1` | 12.5 s |
-| `fogline scan --history none` | 0.26 s |
+Measured again on 2026-11-20 with `fogline scan` itself, for the commit before the change to git's default diff (`6db1fc3`) and for the change: release builds, git 2.52, 11 cores, the two builds run in turn, median of seven runs (three for `--jobs 4` and `--jobs 1`, five for `--history none`). The machine was not idle. On 2026-11-19, on a quieter machine, the build with the minimal diff took 2.5 s, 4.2 s, 12.5 s and 0.26 s.
 
-It reports 35,123 commits, 591 merges, 3,378,909 lines added and 2,253,367 deleted, in 154,174 changes to 11,797 paths, 2,398 of them renames. The history is the same for 1, 4 and 11 jobs, and it is what one `git log --numstat` process reports, commit for commit. The command at the end of §7 repeats that check and prints these counts.
+| Command | Minimal diff, before | Default diff, now |
+|---|---|---|
+| `fogline scan`, which here means 11 jobs | 2.84 s | 2.82 s |
+| `fogline scan --jobs 4` | 4.32 s | 4.27 s |
+| `fogline scan --jobs 1` | 13.25 s | 12.78 s |
+| `fogline scan --history none` | 0.37 s | 0.39 s |
+
+It reports 35,123 commits, 591 merges, 3,426,961 lines added and 2,301,419 deleted, in 154,174 changes to 11,797 paths, 2,398 of them renames. The history is the same for 1, 4 and 11 jobs, and it is what one `git log --numstat` process reports, commit for commit. The command at the end of §7 repeats that check and prints these counts.
+
+Measured on 2026-11-20 on codegraph at `69bbb38978`, the repository that showed what the minimal diff can cost: 1,949 commits of which 68 are merges, and 9,787 changes. Four commits regenerate a parser file each. The rows for single commits are the command of §5.3 given that one commit, one process.
+
+| | Minimal diff, before | Default diff, now |
+|---|---|---|
+| `fogline scan` | 261 s (one run) | 2.5 s (median of five) |
+| Lines added and deleted | 5,602,721 and 2,242,877 | 5,740,755 and 2,380,911 |
+| Commit `8c38b80c` alone: `grammars/scala/parser.c`, 1,199,088 lines before it | 227.0 s | 1.1 s |
+| Commit `7efa65b6` alone: `grammars/swift/parser.c`, 615,258 lines | 49.9 s | 0.8 s |
+| Commit `69bbb389` alone: `grammars/kotlin/parser.c`, 678,360 lines | 38.1 s | 0.5 s |
+| Commit `9f0ed704` alone: `grammars/dart/parser.c`, 199,872 lines | 6.8 s | 0.2 s |
+
+The comparisons of the two diffs, here and in §5.2, can be repeated with git alone:
+
+```bash
+# The changes of a history, one on each line, for the default diff and for the smallest one.
+for diff in myers minimal; do
+  git log --no-merges --format=%H --numstat -M50% -l1000 --diff-algorithm=$diff <head> |
+    awk '/^[0-9a-f]{40}$/ {id = $0; next} NF {print id "\t" $0}' > $diff.txt
+done
+# Lines added and deleted. Django: 3426961 2301419 for myers, 3378909 2253367 for minimal.
+awk -F'\t' '$2 != "-" {added += $2; deleted += $3} END {print added, deleted}' myers.txt
+# The changes that the two count differently, and the commits that hold one. Django: 1451 and 920.
+awk 'NR == FNR {line[FNR] = $0; next} line[FNR] != $0' minimal.txt myers.txt > differ.txt
+wc -l < differ.txt; cut -c1-40 differ.txt | sort -u | wc -l
+# One commit, timed.
+time git diff-tree -r --root -M50% -l1000 --numstat --diff-algorithm=minimal 8c38b80c > /dev/null
+```
 
 What the numbers say:
 
 - The whole Phase 1 scan is under 3 s of git time on a 35,000-commit repository. The plan's 15 s target is a ceiling, not a stretch.
 - Parallel plumbing is exact: the workers' output equals the single process byte for byte.
-- The diff algorithm matters. With rename detection off, the minimal diff reports 47,941 fewer added lines than git's default (3,643,292 against 3,691,233) and changes the per-file sum for 862 of 9,607 paths, for 3–5% more time.
-- Rename detection matters. With git's default diff, leaving it off inflates added lines by 7.7% across Django's 2,398 renames.
-- Together: the pinned command reports 3,378,909 added lines over Django's history. Git's defaults without rename detection report 3,691,233, which is 9% more.
+- The diff algorithm matters, a little for the numbers and without limit for the time. On Django git's default diff counts 48,052 more added lines than the smallest diffs (3,426,961 against 3,378,909, which is 1.4%), in 1,451 of the 154,174 changes and in 920 of the 34,532 commits that are not merges, and the scan takes the same time with either. On codegraph it counts 138,034 more (2.5%), 137,656 of them in the four commits above, and the scan takes a hundredth of the time.
+- Rename detection matters. Leaving it off inflates added lines by 7.7% across Django's 2,398 renames: 3,691,233 against the 3,426,961 of the pinned command.
 - Blaming every text file of Django would take roughly two and a half minutes with 10 processes, if the sample is representative. That is fine as a one-time oracle in Phase 2 and too slow as the everyday path, which is why Phase 2 builds an incremental tracker.
 
 Budgets for this phase (all targets):

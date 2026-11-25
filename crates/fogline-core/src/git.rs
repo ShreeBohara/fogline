@@ -38,18 +38,6 @@ impl Version {
         patch: 0,
     };
 
-    /// The first git whose minimal diff really is the smallest one. Older
-    /// gits first mark some lines as changed, as a shortcut, and that can
-    /// leave a diff longer than it has to be: in about 1.3% of the diffs of
-    /// git's own history, says the commit that ended it (git 03f2915541).
-    /// Git's `xdiff/xprepare.c` skips the shortcut for the minimal diff at
-    /// the v2.50.0 tag and not at v2.49.0.
-    pub const EXACT_MINIMAL_DIFF: Version = Version {
-        major: 2,
-        minor: 50,
-        patch: 0,
-    };
-
     /// Reads the version out of what `git --version` prints.
     ///
     /// Vendors add their own suffixes, so only the leading numbers count:
