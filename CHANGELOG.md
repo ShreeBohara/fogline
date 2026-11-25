@@ -25,3 +25,4 @@ Notable changes, newest first. The format follows [Keep a Changelog](https://kee
 
 - A user's or a machine's git attributes file no longer changes which files a scan counts as binary.
 - A scan no longer takes minutes on a repository that holds huge generated files. Lines were counted with the smallest possible diff, and nothing bounds the time git needs to find that one: on codegraph, where four commits regenerate parser files of up to 1,200,000 lines, a scan took about four minutes. Lines are now counted with git's default diff, which gives up a search that gets expensive, and the same scan takes 2.5 s. The totals are a little higher for it, by 1.4% of the added lines over Django's history.
+- A small `core.bigFileThreshold` in the user's git configuration no longer lowers a scan's line counts. Git counts a file above that size as binary, without its lines: with `100k`, a scan of Django counted 14% fewer added lines.
