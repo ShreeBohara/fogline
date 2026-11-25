@@ -9,10 +9,13 @@
 //! files at that commit with their sizes and line counts, and how to read
 //! the history behind it: every commit, and the lines each one added to and
 //! deleted from each file. It also reads the marks that coding agents leave
-//! on commits, and says which commits are agent-attributed.
+//! on commits, and says which commits are agent-attributed. A file's
+//! history follows it through its renames, and every scan knows the caveats
+//! that its numbers come with.
 
 pub mod aggregate;
 pub mod attribution;
+pub mod caveats;
 pub mod classify;
 pub mod files;
 pub mod git;

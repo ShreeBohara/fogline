@@ -209,21 +209,22 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 
 **Wording rule for every surface.** Say "agent-attributed", never "AI-written". Commit counts are stated as "at least N". Line shares are estimates: they undercount when agents leave no signature and overcount when a signed commit includes hand-written lines. CodebaseQA's history shows the first effect: 17 of its first 51 commits carry a Claude co-author trailer, while the project's own notes describe AI assistance throughout.
 
-**Caveats.** The manifest lists the ones that apply, by id. The viewer shows the text.
+**Caveats.** The manifest lists the ones that apply, by id and in the order of this table. The viewer shows the text. They are defined once, in `crates/fogline-core/src/caveats.rs`, which also decides which of them a scan carries.
 
-| id | Shown as |
-|---|---|
-| `head_only` | Shows the committed state at this commit. Uncommitted changes are not included. |
-| `commit_level_attribution` | A commit with an agent signature counts all of its added lines as agent-attributed, including any a person wrote. |
-| `signatures_undercount` | Agents that leave no signature are invisible here. Read commit counts as "at least". |
-| `added_not_surviving` | Shares count lines added over history, not the lines that survive today. Line-level tracking comes in a later version. |
-| `merges_have_no_stats` | Changes made while resolving merges are not counted. |
-| `renames_by_similarity` | Renames are detected by similarity. A heavily edited rename counts as a new file. |
-| `history_before_rename_dropped` | History from before a file was renamed is missing. (Only if task 3.5 is not done.) |
-| `shallow_clone` | This clone holds only part of the history. |
-| `lossy_paths` | Some paths are not valid UTF-8 and were converted. |
-| `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. |
-| `history_off` | History was not read (`--history none`). |
+| id | Shown as | Applies when |
+|---|---|---|
+| `head_only` | Shows the committed state at this commit. Uncommitted changes are not included. | Always |
+| `commit_level_attribution` | A commit with an agent signature counts all of its added lines as agent-attributed, including any a person wrote. | History was read |
+| `signatures_undercount` | Agents that leave no signature are invisible here. Read commit counts as "at least". | History was read |
+| `added_not_surviving` | Shares count lines added over history, not the lines that survive today. Line-level tracking comes in a later version. | History was read |
+| `merges_have_no_stats` | Changes made while resolving merges are not counted. A file that a merge commit added has no history. | The history has a merge commit |
+| `renames_by_similarity` | A file keeps its history through a rename that git detects, which it does by similarity. A file that was renamed and heavily edited in one commit counts as a new file. A change made under a file's old name, on a branch that was merged after the rename, can be missing from the file's history. | History was read |
+| `shallow_clone` | This clone holds only part of the history. | The clone is shallow |
+| `lossy_paths` | Some paths are not valid UTF-8 and were converted. | Such a path is among the files or in the history |
+| `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. | The git is older than 2.41 |
+| `history_off` | History was not read (`--history none`). | History was not read |
+
+The summary of `fogline scan` prints a note, in its own words, for the three that come from the clone or from the machine's git: `shallow_clone`, `lossy_paths` and `attributes_from_work_tree`. The others hold for every scan of their kind, and the viewer lists them.
 
 ### 5.3 How git is called
 
@@ -526,7 +527,7 @@ The riskiest part goes first, while the binary is still trivial.
 | 3.2 ✓ | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
 | 3.3 ✓ | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
 | 3.4 ✓ | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every mark has a fixture commit; v1 at `f857867` gives 17 of 51 |
-| 3.5 | Carry history across renames to the current path (SHOULD); caveat registry | Rename case in fixture F3 |
+| 3.5 ✓ | Carry history across renames to the current path; caveat registry | The rename cases in fixture F3: both renamed files have the history that `git log --follow` finds for them |
 | 3.6 | Bundle writer, schema export, TypeScript types, drift check, `scan --out`, `--json`, `--timings` | Two scans give identical bytes in every file but `run.json` |
 | 3.7 | `cargo xtask bench scan` over `bench/corpus.toml` | Django scans in 5 s or less (target) |
 | 3.8 | ADR-0005: scan semantics and bundle v0 | Merged |
