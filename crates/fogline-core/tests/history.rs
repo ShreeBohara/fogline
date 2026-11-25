@@ -12,6 +12,10 @@
 //! - against one `git log --numstat` process, which does the same work
 //!   without it being cut into runs;
 //! - against itself, with other numbers of workers.
+//!
+//! How a file's history is carried across its renames is checked by two
+//! more: against `git log --follow`, which follows one file, and against a
+//! second way of working it out, from the oldest commit forward.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -21,6 +25,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use fogline_core::aggregate::{self, PathHistory, Totals};
+use fogline_core::attribution::{self, Class};
 use fogline_core::git::{self, Version};
 use fogline_core::history::{self, Change, Commit, History};
 use fogline_core::repo::{self, Repository};
@@ -311,22 +316,46 @@ fn sums_the_history_of_each_path() {
             last_at: start + 6 * DAY,
         }
     );
-    // A rename counts for the new path, and what came before stays with
-    // the old one (carrying it over is task 3.5).
+    // A renamed file keeps its history. Ada wrote this one as
+    // `src/old_name.py`, and Grace renamed it four days later.
     assert_eq!(
-        (
-            paths["src/old_name.py"].commits,
-            paths["src/old_name.py"].added
-        ),
-        (1, 6)
+        paths["src/new_name.py"],
+        PathHistory {
+            commits: 2,
+            commits_agent: 0,
+            added: 6,
+            added_agent: 0,
+            added_automation: 0,
+            deleted: 0,
+            authors: 2,
+            first_at: start,
+            last_at: start + 4 * DAY,
+        }
     );
+    // Renamed and edited in one commit: Ada wrote eight lines as
+    // `src/report.py`, and changed one of them when she renamed the file.
     assert_eq!(
-        (
-            paths["src/new_name.py"].commits,
-            paths["src/new_name.py"].added
-        ),
-        (1, 0)
+        paths["src/summary.py"],
+        PathHistory {
+            commits: 2,
+            commits_agent: 0,
+            added: 9,
+            added_agent: 0,
+            added_automation: 0,
+            deleted: 1,
+            authors: 1,
+            first_at: start,
+            last_at: start + 5 * DAY,
+        }
     );
+    // The old names are gone. Every file at HEAD has a history under the
+    // name it has there, and the one other path is the deleted file.
+    assert!(!paths.contains_key("src/old_name.py"));
+    assert!(!paths.contains_key("src/report.py"));
+    let mut expected = f3::FILES.to_vec();
+    expected.push("src/doomed.py");
+    expected.sort_unstable();
+    assert_eq!(paths.keys().copied().collect::<Vec<_>>(), expected);
     // A binary file has a commit and no lines.
     assert_eq!(
         (
@@ -507,30 +536,34 @@ fn lines_beyond_the_smallest_change(found: &Repository, history: &History) -> u6
 
 // ---- Route two: one git process ----
 
+/// The options that decide how the engine's git counts lines and pairs
+/// renames, for the `git log` commands of these tests. They have to be the
+/// ones in the engine's `DIFF_TREE`.
+const HOW_LINES_ARE_COUNTED: [&str; 6] = [
+    "-M50%",
+    "-l1000",
+    "--diff-algorithm=myers",
+    "--no-textconv",
+    "--no-ext-diff",
+    "--ignore-submodules=all",
+];
+
 /// Reads the same history from a single `git log --numstat`, which walks
 /// the commits itself and prints each one's changes under its id.
 fn one_process(found: &Repository) -> Vec<(String, Vec<Change>)> {
     let head = found.head.as_str();
-    let output = git_in(
-        &found.root,
-        &[("GIT_ATTR_SOURCE", head)],
-        &[
-            "log",
-            "--topo-order",
-            "-z",
-            "--no-show-signature",
-            "--format=%H",
-            "--numstat",
-            "--root",
-            "-M50%",
-            "-l1000",
-            "--diff-algorithm=myers",
-            "--no-textconv",
-            "--no-ext-diff",
-            "--ignore-submodules=all",
-            head,
-        ],
-    );
+    let mut args = vec![
+        "log",
+        "--topo-order",
+        "-z",
+        "--no-show-signature",
+        "--format=%H",
+        "--numstat",
+        "--root",
+    ];
+    args.extend(HOW_LINES_ARE_COUNTED);
+    args.push(head);
+    let output = git_in(&found.root, &[("GIT_ATTR_SOURCE", head)], &args);
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
     let body = output
         .strip_suffix(&[0])
@@ -585,6 +618,280 @@ fn agrees_with_one_process(found: &Repository, history: &History) -> bool {
             .iter()
             .zip(&reference)
             .all(|(commit, (id, changes))| &commit.id == id && &commit.changes == changes)
+}
+
+// ---- Renames: a file's history under its earlier names ----
+
+/// The history of each file, worked out a second way. The engine reads the
+/// commits newest first and remembers what each old name is called today.
+/// This reads them oldest first: every file gets a number when it is first
+/// seen, a rename moves the number to the new path, and at the end a file
+/// is filed under the last path it had.
+fn replayed(history: &History) -> BTreeMap<String, PathHistory> {
+    // The number of the file that is at each path right now.
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    // For each file: the last path it had, and its changes with the place
+    // of their commit in the history.
+    let mut last_path: Vec<&str> = Vec::new();
+    let mut changes_of: Vec<Vec<(usize, &Change)>> = Vec::new();
+
+    for (index, commit) in history.commits.iter().enumerate().rev() {
+        // Which file each change is about, by the names from before this
+        // commit. All of them are looked up before any rename moves a
+        // number, so that the order of the changes within a commit makes no
+        // difference.
+        let files: Vec<usize> = commit
+            .changes
+            .iter()
+            .map(|change| {
+                let before = change.renamed_from.as_deref().unwrap_or(&change.path);
+                *at.entry(before).or_insert_with(|| {
+                    last_path.push(before);
+                    changes_of.push(Vec::new());
+                    last_path.len() - 1
+                })
+            })
+            .collect();
+        for change in &commit.changes {
+            if let Some(old) = &change.renamed_from {
+                at.remove(old.as_str());
+            }
+        }
+        for (change, &file) in commit.changes.iter().zip(&files) {
+            if change.renamed_from.is_some() {
+                at.insert(&change.path, file);
+                last_path[file] = &change.path;
+            }
+            changes_of[file].push((index, change));
+        }
+    }
+
+    // Two files can end at one path: a file that was deleted, and one that
+    // was given its name afterwards. A file is known by its path, so they
+    // are one.
+    let mut by_last_path: BTreeMap<&str, Vec<(usize, &Change)>> = BTreeMap::new();
+    for (file, changes) in changes_of.into_iter().enumerate() {
+        by_last_path
+            .entry(last_path[file])
+            .or_default()
+            .extend(changes);
+    }
+
+    by_last_path
+        .into_iter()
+        .map(|(path, changes)| {
+            let class = |index: usize| attribution::of(&history.commits[index]).class;
+            let added_by = |wanted: Class| -> u64 {
+                changes
+                    .iter()
+                    .filter(|(index, _)| class(*index) == wanted)
+                    .map(|(_, change)| change.added)
+                    .sum()
+            };
+            let commits: BTreeSet<usize> = changes.iter().map(|(index, _)| *index).collect();
+            let times = || {
+                commits
+                    .iter()
+                    .map(|&index| history.commits[index].author_time)
+            };
+            let sum = PathHistory {
+                commits: commits.len() as u64,
+                commits_agent: commits
+                    .iter()
+                    .filter(|&&index| class(index) == Class::AgentAttributed)
+                    .count() as u64,
+                added: changes.iter().map(|(_, change)| change.added).sum(),
+                added_agent: added_by(Class::AgentAttributed),
+                added_automation: added_by(Class::Automation),
+                deleted: changes.iter().map(|(_, change)| change.deleted).sum(),
+                authors: commits
+                    .iter()
+                    .map(|&index| history.commits[index].author_email.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len() as u64,
+                first_at: times().min().expect("a file has a change"),
+                last_at: times().max().expect("a file has a change"),
+            };
+            (path.to_owned(), sum)
+        })
+        .collect()
+}
+
+/// True when the engine's history of each file is what the replay finds.
+fn agrees_with_the_replay(history: &History) -> bool {
+    let engine: BTreeMap<String, PathHistory> = aggregate::by_path(history)
+        .into_iter()
+        .map(|(path, sum)| (path.to_owned(), sum))
+        .collect();
+    engine == replayed(history)
+}
+
+/// What git itself says about one file when it is asked to follow it
+/// through its renames: how many commits changed the file under any of its
+/// names, and the lines they added and deleted.
+fn followed_by_git(found: &Repository, path: &str) -> (u64, u64, u64) {
+    let head = found.head.as_str();
+    let mut args = vec![
+        "log",
+        "--follow",
+        "--no-merges",
+        "--numstat",
+        "--format=commit %H",
+    ];
+    args.extend(HOW_LINES_ARE_COUNTED);
+    args.extend([head, "--", path]);
+    let output = git_in(
+        &found.root,
+        // The path is a path, and not a pattern that could match several.
+        &[("GIT_ATTR_SOURCE", head), ("GIT_LITERAL_PATHSPECS", "1")],
+        &args,
+    );
+    let (mut commits, mut added, mut deleted) = (0, 0, 0);
+    for line in String::from_utf8_lossy(&output).lines() {
+        if line.starts_with("commit ") {
+            commits += 1;
+        } else if !line.is_empty() {
+            // `<added> TAB <deleted> TAB <path>`, with `-` for a binary file.
+            let mut fields = line.split('\t');
+            let mut number = || fields.next().and_then(|digits| digits.parse::<u64>().ok());
+            added += number().unwrap_or(0);
+            deleted += number().unwrap_or(0);
+        }
+    }
+    (commits, added, deleted)
+}
+
+/// The spec's check for carrying history across renames: on F3, and on F1,
+/// every file at HEAD has the history git finds when it is asked to follow
+/// that one file.
+///
+/// The comparison holds for these two fixtures and not for every history.
+/// Git follows a file into a copy as well: a new file that is at least half
+/// like a file of the commit before continues with that file's history. The
+/// engine does not detect copies (spec section 5.2). And where a branch
+/// changes a file that another branch renames, the two can differ too
+/// (`aggregate::by_path` says how). Neither happens in F1 or F3.
+#[test]
+fn a_file_at_head_has_the_history_git_follows() {
+    for fixture in [f1::build().unwrap(), f3::build().unwrap()] {
+        let found = discover(&fixture);
+        let history = history::read(&found, 3).unwrap();
+        let paths = aggregate::by_path(&history);
+        for path in tree(&found.root, "HEAD").keys() {
+            let sum = paths[path.as_str()];
+            assert_eq!(
+                (sum.commits, sum.added, sum.deleted),
+                followed_by_git(&found, path),
+                "{path}"
+            );
+        }
+    }
+}
+
+/// A copy is a new file. The file it was copied from keeps its history to
+/// itself, because the scan does not ask git to look for copies.
+#[test]
+fn a_copy_starts_its_own_history() {
+    let who = Identity {
+        name: "Ada Example",
+        email: "ada@example.com",
+    };
+    let text: String = (0..30).map(|n| format!("line {n}\n")).collect();
+    let repo = RepoBuilder::new().unwrap();
+    repo.write("original.txt", &text).unwrap();
+    repo.commit(who, 1_780_000_000, "Write a file\n").unwrap();
+    repo.write("copy.txt", &text).unwrap();
+    repo.commit(who, 1_780_000_100, "Copy it\n").unwrap();
+    let fixture = repo.finish().unwrap();
+
+    let history = read(&fixture);
+    assert_eq!(history.commits[0].changes, [change("copy.txt", 30, 0)]);
+    let paths = aggregate::by_path(&history);
+    assert_eq!(
+        (paths["copy.txt"].commits, paths["copy.txt"].added),
+        (1, 30)
+    );
+    assert_eq!(
+        (paths["original.txt"].commits, paths["original.txt"].added),
+        (1, 30)
+    );
+}
+
+#[test]
+fn following_renames_from_the_oldest_commit_gives_the_same() {
+    for fixture in [f1::build().unwrap(), f3::build().unwrap()] {
+        assert!(agrees_with_the_replay(&read(&fixture)));
+    }
+}
+
+/// Names that are used again, read from a real repository: a draft takes
+/// the name of a file that was deleted, a new draft is written, and two
+/// files swap their content. Git reports one rename, and none for the swap.
+#[test]
+fn names_that_are_used_again_keep_their_files_apart() {
+    let ada = Identity {
+        name: "Ada Example",
+        email: "ada@example.com",
+    };
+    let grace = Identity {
+        name: "Grace Example",
+        email: "grace@example.com",
+    };
+    let lines = |word: &str| -> String { (0..30).map(|n| format!("{word} line {n}\n")).collect() };
+    let start = 1_780_000_000;
+
+    let repo = RepoBuilder::new().unwrap();
+    repo.write(
+        "final.rs",
+        "fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\n",
+    )
+    .unwrap();
+    repo.write("draft.rs", "// a draft\nfn better() {}\nfn best() {}\n")
+        .unwrap();
+    repo.write("a.txt", &lines("alpha")).unwrap();
+    repo.write("b.txt", &lines("beta")).unwrap();
+    repo.commit(ada, start, "Start\n").unwrap();
+    repo.remove("final.rs").unwrap();
+    repo.commit(grace, start + DAY, "Delete the old file\n")
+        .unwrap();
+    repo.rename("draft.rs", "final.rs").unwrap();
+    repo.commit(ada, start + 2 * DAY, "Give the draft its name\n")
+        .unwrap();
+    repo.write("a.txt", &lines("beta")).unwrap();
+    repo.write("b.txt", &lines("alpha")).unwrap();
+    repo.commit(ada, start + 3 * DAY, "Swap two files\n")
+        .unwrap();
+    repo.write("draft.rs", "// the next draft\n").unwrap();
+    repo.commit(grace, start + 4 * DAY, "Start a new draft\n")
+        .unwrap();
+    let fixture = repo.finish().unwrap();
+
+    let history = read(&fixture);
+    let changes = |subject_line: &str| commit_named(&history, subject_line).changes.clone();
+    assert_eq!(
+        changes("Give the draft its name"),
+        [renamed("draft.rs", "final.rs", 0, 0)]
+    );
+    // Git shows the swap as two changed files, with no rename. The comment
+    // in `aggregate::by_path` counts on that.
+    assert_eq!(
+        changes("Swap two files"),
+        [change("a.txt", 30, 30), change("b.txt", 30, 30)]
+    );
+
+    let paths = aggregate::by_path(&history);
+    let numbers = |path: &str| {
+        let sum = paths[path];
+        (sum.commits, sum.added, sum.deleted, sum.authors)
+    };
+    // The file that was deleted and the draft that took its name share one
+    // history. The first commit wrote both of them, and it counts once.
+    assert_eq!(numbers("final.rs"), (3, 7, 4, 2));
+    // The new draft has its own commit and nothing of the old draft's.
+    assert_eq!(numbers("draft.rs"), (1, 1, 0, 1));
+    assert_eq!(numbers("a.txt"), (2, 60, 30, 1));
+    assert_eq!(numbers("b.txt"), (2, 60, 30, 1));
+    assert!(agrees_with_the_replay(&history));
 }
 
 // ---- A larger history, made by a fixed sequence of numbers ----
@@ -850,6 +1157,17 @@ fn a_generated_history_passes_every_check() {
             "{jobs} workers"
         );
     }
+
+    // Renames. The generator never uses a name twice, so every rename
+    // leaves one name fewer than there are files. And each file's history
+    // is the same when it is worked out from the oldest commit forward.
+    let names: BTreeSet<&str> = changes.iter().map(|change| change.path.as_str()).collect();
+    let renames = changes
+        .iter()
+        .filter(|change| change.renamed_from.is_some())
+        .count();
+    assert_eq!(aggregate::by_path(&alone).len() + renames, names.len());
+    assert!(agrees_with_the_replay(&alone), "the replay disagrees");
 }
 
 /// Git's default diff does not always find the smallest change. It stops
@@ -914,7 +1232,7 @@ fn a_large_rewrite_is_counted_as_git_counts_it() {
 }
 
 /// The same checks on any repository, for the ones too large to build in a
-/// test. Django's history takes about a minute:
+/// test. Django's history takes about half a minute:
 ///
 /// ```text
 /// FOGLINE_HISTORY_REPO=/path/to/django cargo test --release -p fogline-core \
@@ -938,15 +1256,19 @@ fn a_repository_of_your_choice_passes_the_checks() {
         "one process disagrees"
     );
 
+    assert!(agrees_with_the_replay(&alone), "the replay disagrees");
+
     let totals = aggregate::totals(&alone);
     let changes: Vec<&Change> = alone
         .commits
         .iter()
         .flat_map(|commit| &commit.changes)
         .collect();
+    let names: BTreeSet<&str> = changes.iter().map(|change| change.path.as_str()).collect();
+    let paths = aggregate::by_path(&alone);
     println!(
         "{} @ {}: {} commits, {} merges, {} changes of which {} renames, \
-         {} lines added, {} deleted, {} paths",
+         {} lines added, {} deleted, {} paths, which are {} files once renames are followed",
         found.name,
         &found.head[..10],
         totals.commits,
@@ -958,7 +1280,44 @@ fn a_repository_of_your_choice_passes_the_checks() {
             .count(),
         totals.added,
         totals.deleted,
-        aggregate::by_path(&alone).len(),
+        names.len(),
+        paths.len(),
+    );
+
+    // Where the rule for renames can have left a change behind: under a
+    // name that some file was renamed away from. What is found there is a
+    // new file that was given an old name, or a change the rule did not
+    // carry (`aggregate::by_path` says when). So this is the most that can
+    // have been left behind.
+    let renamed_away: BTreeSet<&str> = changes
+        .iter()
+        .filter_map(|change| change.renamed_from.as_deref())
+        .collect();
+    let under_old_names: Vec<&PathHistory> = paths
+        .iter()
+        .filter(|(path, _)| renamed_away.contains(*path))
+        .map(|(_, sum)| sum)
+        .collect();
+    // A file at HEAD has no history when a merge commit added it.
+    let at_head = tree(&found.root, "HEAD");
+    let without_history: Vec<&str> = at_head
+        .keys()
+        .map(String::as_str)
+        .filter(|path| !paths.contains_key(path))
+        .collect();
+    println!(
+        "  {} of those files are under a name that a file was renamed away from, with {} \
+         added lines; {} of the {} files at HEAD have no history{}",
+        under_old_names.len(),
+        under_old_names.iter().map(|sum| sum.added).sum::<u64>(),
+        without_history.len(),
+        at_head.len(),
+        // The first few of them by name.
+        without_history
+            .iter()
+            .take(5)
+            .map(|path| format!(", {path}"))
+            .collect::<String>(),
     );
     println!(
         "  at least {} agent-attributed commits with {} added lines; {} commits by bots with {}",

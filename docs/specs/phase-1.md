@@ -190,7 +190,11 @@ The summary does not depend on `--jobs`: a contract test compares it for 1, 4, 1
 - A rename, detected by git at 50% similarity, counts only the lines that changed inside the file. Copies are not detected. In a commit where more than 1,000 files could pair up, git pairs only the ones that are exactly alike. Which files git pairs can depend on the git. Before 2.43.2 it left out the last line of a file that does not end with a line break when it measured how alike two files are (git commit 1c5bc6971e, in the v2.43.2 tag and not in v2.43.1). Measured: in Django's commit `fad4a93275` git 2.25.1 does not pair three files of 3 and 4 lines that git 2.52.0 pairs, and so counts 7 added and 7 deleted lines more for that commit. No other commit of Django or of codegraph is counted differently. A scan does not say this yet.
 - Merge commits carry no line statistics of their own.
 - A change to a submodule entry is left out, because the entry is not a file. A change to a symbolic link counts the one line git shows for it, the path it points to.
-- Per file, summed over history: `commits`, `added`, `deleted`, `authors` (distinct author emails, as the commits record them), `first_at` and `last_at` (the earliest and the latest author date), and the agent and automation splits below. History before a rename is carried to the file's current path (SHOULD; if it is not done, a caveat says so).
+- Per file, summed over history: `commits`, `added`, `deleted`, `authors` (distinct author emails, as the commits record them), `first_at` and `last_at` (the earliest and the latest author date), and the agent and automation splits below. A commit that changed the file counts once. A file that only a merge commit ever changed has no history.
+- A file keeps its history when it is renamed: what happened under an earlier name counts for the name the file has at HEAD. A file that was deleted is filed under the last name it had. The rule is one pass over the commits, newest first: a commit that renamed `a` to `b` makes every older change to `a` a change to the file that is `b` today, or to whatever `b` was renamed to after that. It has three limits.
+  - Git decides what a rename is. A file that was renamed and mostly rewritten in one commit starts again as a new file. Two files that swap their names in one commit are two changed files to git, so each path keeps its own history.
+  - A file is known by its path. A file that was deleted and another that was created at the same path later share one history.
+  - The rule follows git's order of the commits, not the branches. A change made under the old name, on a branch that was merged after the rename, can come before the rename in that order, and then it stays with the old name. In a history without merges this cannot happen. When two branches rename one file, the older commits go to the rename that is nearest to them in git's order. §11 has what this comes to on Django.
 - `.mailmap` is not applied. Git reads that file from the work tree, so an uncommitted edit to it would change the count of authors. Measured with git 2.52: a `.mailmap` that was never committed changed what `%aE` printed for six of ten commits.
 
 **Attribution** is per commit:
@@ -205,21 +209,22 @@ A file's *agent-attributed share* is the added lines from agent-attributed commi
 
 **Wording rule for every surface.** Say "agent-attributed", never "AI-written". Commit counts are stated as "at least N". Line shares are estimates: they undercount when agents leave no signature and overcount when a signed commit includes hand-written lines. CodebaseQA's history shows the first effect: 17 of its first 51 commits carry a Claude co-author trailer, while the project's own notes describe AI assistance throughout.
 
-**Caveats.** The manifest lists the ones that apply, by id. The viewer shows the text.
+**Caveats.** The manifest lists the ones that apply, by id and in the order of this table. The viewer shows the text. They are defined once, in `crates/fogline-core/src/caveats.rs`, which also decides which of them a scan carries.
 
-| id | Shown as |
-|---|---|
-| `head_only` | Shows the committed state at this commit. Uncommitted changes are not included. |
-| `commit_level_attribution` | A commit with an agent signature counts all of its added lines as agent-attributed, including any a person wrote. |
-| `signatures_undercount` | Agents that leave no signature are invisible here. Read commit counts as "at least". |
-| `added_not_surviving` | Shares count lines added over history, not the lines that survive today. Line-level tracking comes in a later version. |
-| `merges_have_no_stats` | Changes made while resolving merges are not counted. |
-| `renames_by_similarity` | Renames are detected by similarity. A heavily edited rename counts as a new file. |
-| `history_before_rename_dropped` | History from before a file was renamed is missing. (Only if task 3.5 is not done.) |
-| `shallow_clone` | This clone holds only part of the history. |
-| `lossy_paths` | Some paths are not valid UTF-8 and were converted. |
-| `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. |
-| `history_off` | History was not read (`--history none`). |
+| id | Shown as | Applies when |
+|---|---|---|
+| `head_only` | Shows the committed state at this commit. Uncommitted changes are not included. | Always |
+| `commit_level_attribution` | A commit with an agent signature counts all of its added lines as agent-attributed, including any a person wrote. | History was read |
+| `signatures_undercount` | Agents that leave no signature are invisible here. Read commit counts as "at least". | History was read |
+| `added_not_surviving` | Shares count lines added over history, not the lines that survive today. Line-level tracking comes in a later version. | History was read |
+| `merges_have_no_stats` | Changes made while resolving merges are not counted. A file that a merge commit added has no history. | The history has a merge commit |
+| `renames_by_similarity` | A file keeps its history through a rename that git detects, which it does by similarity. A file that was renamed and heavily edited in one commit counts as a new file. A change made under a file's old name, on a branch that was merged after the rename, can be missing from the file's history. | History was read |
+| `shallow_clone` | This clone holds only part of the history. | The clone is shallow |
+| `lossy_paths` | Some paths are not valid UTF-8 and were converted. | Such a path is among the files or in the history |
+| `attributes_from_work_tree` | This git is older than 2.41, so which files count as binary follows the `.gitattributes` in the work tree, not the one in the commit. | The git is older than 2.41 |
+| `history_off` | History was not read (`--history none`). | History was not read |
+
+The summary of `fogline scan` prints a note, in its own words, for the three that come from the clone or from the machine's git: `shallow_clone`, `lossy_paths` and `attributes_from_work_tree`. The others hold for every scan of their kind, and the viewer lists them.
 
 ### 5.3 How git is called
 
@@ -522,7 +527,7 @@ The riskiest part goes first, while the binary is still trivial.
 | 3.2 ✓ | Files: tree listing, line counts, language table, flags | A test-only line counter that reads the blobs agrees on every fixture file |
 | 3.3 ✓ | History: metadata walk, K parallel workers, stream parsers including rename records, aggregation | Identical output for `--jobs 1`, `4` and `11` on the fixtures and on Django |
 | 3.4 ✓ | Attribution: signature table, matcher, classification, per-signature totals; verify the pending signatures | Every mark has a fixture commit; v1 at `f857867` gives 17 of 51 |
-| 3.5 | Carry history across renames to the current path (SHOULD); caveat registry | Rename case in fixture F3 |
+| 3.5 ✓ | Carry history across renames to the current path; caveat registry | The rename cases in fixture F3: both renamed files have the history that `git log --follow` finds for them |
 | 3.6 | Bundle writer, schema export, TypeScript types, drift check, `scan --out`, `--json`, `--timings` | Two scans give identical bytes in every file but `run.json` |
 | 3.7 | `cargo xtask bench scan` over `bench/corpus.toml` | Django scans in 5 s or less (target) |
 | 3.8 | ADR-0005: scan semantics and bundle v0 | Merged |
@@ -571,7 +576,7 @@ The riskiest part goes first, while the binary is still trivial.
 | Unit | Parsers for `ls-tree`, numstat (rename records included) and log records; trailer extraction; signature matching; the file classifier; rename resolution |
 | Seeded, in place of property tests | The parser of the workers' output reads its real input damaged in 20,000 fixed ways and never crashes; cutting the work loses no commit and keeps the order for every count of commits and of runs up to 40; the history is the same for 1 to 1,000 jobs. A fixed sequence of numbers makes a failure repeat. This avoids the proptest dependency; it comes back if these stop finding bugs. |
 | Contract (black box) | Runs the binary named by `FOGLINE_BIN` on each fixture and compares the bundle with a golden file. Also: exit codes, stdout and stderr discipline, determinism, and "the repository is byte-for-byte unchanged after a scan". |
-| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs; the line statistics against the smallest possible change, computed from both versions of each changed file: git may count more, by the same number of lines on both sides (§5.2), and on the fixtures it counts not one more, except on the large file |
+| Differential | The parallel workers against one `git log --numstat` process; the line counts against a counter that reads the blobs; the line statistics against the smallest possible change, computed from both versions of each changed file: git may count more, by the same number of lines on both sides (§5.2), and on the fixtures it counts not one more, except on the large file; each file's history across its renames against a second implementation that reads the commits oldest first, and on fixtures F1 and F3 against `git log --follow` for that file. Git follows a file into a copy too, which the scan does not detect, so that comparison holds only where no file starts as a copy. |
 | Viewer unit (Vitest) | Bundle decoding, hierarchy building, color scales, formatters |
 | Viewer end-to-end (Playwright, Chromium on Linux) | A fixture bundle served by the real binary: the ready event, cells drawn, tooltip, layer switch, caveats listed, no outside requests, one screenshot baseline |
 | Launcher (`node:test`) | Platform table, missing package message, exit code and signal pass-through |
@@ -767,6 +772,8 @@ Measured again on 2026-11-20 with `fogline scan` itself, for the commit before t
 
 It reports 35,123 commits, 591 merges, 3,426,961 lines added and 2,301,419 deleted, in 154,174 changes to 11,797 paths, 2,398 of them renames. The history is the same for 1, 4 and 11 jobs, and it is what one `git log --numstat` process reports, commit for commit. The command at the end of §7 repeats that check and prints these counts.
 
+Once renames are followed (§5.2), those 11,797 paths are 9,455 files, and a second implementation that reads the commits oldest first finds the same history for every one of them. 51 of the files are under a name that some file was renamed away from. That is where a change would be if the rule had left it behind on a branch. It is also where a new file sits that was given an old name, and Django's deprecation shims are such files. Together the 51 hold 5,266 added lines, so at most 0.15% of Django's added lines are with the wrong file for that reason. One of the 7,102 files at HEAD has no history: `tests/schema/__init__.py`, which a merge commit added. The same command prints these counts.
+
 Measured on 2026-11-20 on codegraph at `69bbb38978`, the repository that showed what the minimal diff can cost: 1,949 commits of which 68 are merges, and 9,787 changes. Four commits regenerate a parser file each. The rows for single commits are the command of §5.3 given that one commit, one process.
 
 | | Minimal diff, before | Default diff, now |
@@ -825,7 +832,7 @@ Budgets for this phase (all targets):
 | Windows surprises: paths, encodings, process spawning | Contract tests run on Windows from M1; M6 holds a half-day for it |
 | The spike is inconclusive | The decision rule in §9 always yields an answer; B is the default |
 | MapLibre's coordinate mapping fights back | Three-hour cutoff; A is dropped, B or C carries on |
-| Rename following has corner cases across merges | It is a SHOULD with a caveat defined; first match wins, deterministically |
+| Rename following has corner cases across merges | The rule follows git's order of the commits and §5.2 says what that leaves behind; the nearest rename decides, deterministically. The caveat `renames_by_similarity` says so, and on Django it is at most 0.15% of the added lines (§11). |
 | Antivirus or Gatekeeper flags an unsigned binary | npm installs are not quarantined on macOS. Direct downloads are a LATER concern; signing costs money and is out of scope. |
 | Scope creep into Phase 2 | §1's right-hand column is the list of things to refuse |
 | iCloud damages a checkout again | D2: no checkout lives under Desktop or Documents |

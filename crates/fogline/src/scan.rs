@@ -9,6 +9,7 @@ use std::path::{self, Path};
 use std::thread;
 
 use fogline_core::aggregate::{self, SignatureTotals, Totals};
+use fogline_core::caveats::{self, Caveat};
 use fogline_core::files::{self, Files};
 use fogline_core::git::{self, Version};
 use fogline_core::history::{self, History};
@@ -93,22 +94,43 @@ fn summary(found: &Repository, files: &Files, history: Option<&History>) -> Stri
         None => text.push_str("  history   not read (--history none)\n"),
     }
 
-    // Each of these limits what the numbers mean, so each is said out loud.
-    if found.shallow {
-        text.push_str("  note      this is a shallow clone, so only part of the history is here\n");
-    }
-    if files.lossy_paths || history.is_some_and(|history| history.lossy_paths) {
-        text.push_str("  note      some paths are not valid UTF-8 and were converted\n");
-    }
-    if !files.attributes_from_commit {
-        text.push_str(&format!(
-            "  note      git {} reads .gitattributes from the work tree, not from the commit; \
-             git {} or newer reads the commit\n",
-            found.git,
-            Version::ATTRIBUTES_FROM_COMMIT,
-        ));
+    // The caveats of this scan that are worth a line here (see `note`).
+    for caveat in caveats::that_apply(found, files, history) {
+        if let Some(note) = note(caveat, found) {
+            text.push_str(&format!("  note      {note}\n"));
+        }
     }
     text
+}
+
+/// What the summary says about a caveat of this scan, or `None` for one it
+/// leaves to the viewer.
+///
+/// A caveat that comes from this clone or from this machine's git limits
+/// what the numbers mean, and a person can do something about it, so it is
+/// said out loud. The ones that hold for every scan would only repeat
+/// themselves on every run.
+fn note(caveat: Caveat, found: &Repository) -> Option<String> {
+    match caveat {
+        Caveat::ShallowClone => {
+            Some("this is a shallow clone, so only part of the history is here".to_owned())
+        }
+        Caveat::LossyPaths => Some("some paths are not valid UTF-8 and were converted".to_owned()),
+        Caveat::AttributesFromWorkTree => Some(format!(
+            "git {} reads .gitattributes from the work tree, not from the commit; git {} or \
+             newer reads the commit",
+            found.git,
+            Version::ATTRIBUTES_FROM_COMMIT,
+        )),
+        // The history line already says that history was not read.
+        Caveat::HistoryOff => None,
+        Caveat::HeadOnly
+        | Caveat::CommitLevelAttribution
+        | Caveat::SignaturesUndercount
+        | Caveat::AddedNotSurviving
+        | Caveat::MergesHaveNoStats
+        | Caveat::RenamesBySimilarity => None,
+    }
 }
 
 /// The lines about agents and bots (spec section 5.2).
@@ -628,6 +650,21 @@ mod tests {
         let mut found = repository();
         found.git = Version::MINIMUM;
         let text = summary(&found, &files, Some(&history));
+        assert!(!text.contains("  note      "), "{text}");
+    }
+
+    /// A history with a merge carries six caveats, and none of them is
+    /// about this clone or this machine's git. They hold for every such
+    /// scan, so the summary leaves them to the viewer.
+    #[test]
+    fn the_caveats_of_every_scan_are_not_notes() {
+        let files = files(vec![]);
+        let history = history(vec![commit(2, 0, 0), commit(1, 1, 0), commit(0, 1, 0)]);
+        assert_eq!(
+            caveats::that_apply(&repository(), &files, Some(&history)).len(),
+            6
+        );
+        let text = summary(&repository(), &files, Some(&history));
         assert!(!text.contains("  note      "), "{text}");
     }
 
